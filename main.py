@@ -350,31 +350,49 @@ def revisar_video(respuesta):
 # ================= HERRAMIENTA DEL AGENTE: consultar_stock =================
 # Lee el stock REAL del catalogo. Esta es la 1ra "herramienta" de verdad de Fer.
 def consultar_stock(producto):
+    """
+    Consulta el producto real en Airtable y busca el campo de stock
+    de forma flexible, sin depender de que el campo se llame exactamente
+    'stock_estado'.
+    """
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_CATALOGO}"
     headers = {"Authorization": f"Bearer {AIRTABLE_KEY}"}
-    r = requests.get(url, headers=headers, params={"maxRecords": 100}, timeout=10)
+
+    r = requests.get(
+        url,
+        headers=headers,
+        params={"maxRecords": 100},
+        timeout=10
+    )
+
     if r.status_code != 200:
         print(">>> AIRTABLE (stock) error:", r.status_code, r.text)
         return "No pude consultar el stock en este momento."
-    productos = [reg.get("fields", {}) for reg in r.json().get("records", [])]
-    p = (producto or "").lower().strip()
-    palabras = [w for w in p.split() if len(w) > 3]
-    for prod in productos:
-        texto_prod = (str(prod.get("nombre", "")) + " " + str(prod.get("producto_id", ""))).lower()
-        if (p and p in texto_prod) or any(w in texto_prod for w in palabras):
-            estado = prod.get("stock_estado", "desconocido")
-            return f"El producto '{prod.get('nombre', producto)}' esta: {estado}."
-    nombres = ", ".join(str(prod.get("nombre", "?")) for prod in productos)
-    return f"No encontre ese producto exacto en el catalogo. Los que tengo son: {nombres}."
 
+    registros = r.json().get("records", [])
+    busqueda = (producto or "").lower().strip()
 
-# Si Gemini pidio [CONSULTAR_STOCK: x], consulta el dato real y re-arma la respuesta
-def revisar_stock(respuesta, historial):
-    m = re.search(r"\[CONSULTAR_STOCK:\s*(.*?)\]", respuesta)
-    if not m:
-        return respuesta
-    producto = m.group(1).strip()
-    dato = consultar_stock(producto)
-    print(f">>> STOCK '{producto}': {dato}")
-    refuerzo = (
-        f"[DATO DEL SISTEMA] El cliente pregunt
+    # Palabras útiles para encontrar el producto
+    palabras = [
+        w for w in re.findall(r"[a-záéíóúñ0-9]+", busqueda)
+        if len(w) > 2
+    ]
+
+    for registro in registros:
+        campos = registro.get("fields", {})
+
+        # Mostramos los campos reales en los logs para poder verificar Airtable
+        print(
+            ">>> AIRTABLE PRODUCTO:",
+            campos.get("producto_id"),
+            "| CAMPOS:",
+            list(campos.keys())
+        )
+
+        # Buscamos el producto en todos los campos de texto relevantes
+        texto_producto = " ".join(
+            str(valor).lower()
+            for nombre, valor in campos.items()
+            if isinstance(valor, (str, int, float, bool))
+            and nombre.lower() not in {
+                "url_foto_1", "ur
