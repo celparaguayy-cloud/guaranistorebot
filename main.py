@@ -1,7 +1,8 @@
 """
 FER BOT 2.0 — vendedor completo para Messenger
 IA (Gemini) + memoria (Airtable) + fotos + video + aviso de pedidos a Telegram
-+ "escribiendo..." + anti-duplicados + MODO DUENO (palabra secreta para testear).
++ registro de pedidos en tabla + "escribiendo..." + anti-duplicados
++ MODO DUENO (palabra secreta): asistente con reportes de ventas y auditor de charlas.
 """
 
 import os
@@ -21,11 +22,11 @@ AIRTABLE_KEY   = os.environ["AIRTABLE_KEY"].strip()
 AIRTABLE_BASE  = os.environ["AIRTABLE_BASE"].strip()
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"].strip()
 TELEGRAM_CHAT  = os.environ["TELEGRAM_CHAT"].strip()
-
-# Palabra secreta del dueno (se carga en Render, NO se escribe aca)
 CLAVE_DUENO    = os.environ.get("CLAVE_DUENO", "").strip().lower()
+WHATSAPP_DESTINO = os.environ.get("WHATSAPP_DESTINO", "").strip()   # numero con codigo de pais
+CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "").strip()   # apikey de CallMeBot
 
-TABLA = "Conversaciones"
+TABLA         = "Conversaciones"
 TABLA_PEDIDOS = "Pedidos"
 GRAPH = "https://graph.facebook.com/v21.0/me/messages"
 
@@ -35,12 +36,10 @@ FOTOS_EXTRA       = ["ipl4.jpg", "ipl5.jpg", "ipl6.jpg"]
 VIDEO_URL = "https://youtube.com/shorts/0WoRz-Nzucw"
 
 MENSAJES_VISTOS = set()
-
-# Estado del modo dueno por cada persona (se guarda mientras el bot esta despierto)
 MODO_DUENO = {}
 PALABRAS_SALIR = ["modo vendedor", "modo venta", "volver a vender", "volve a vender",
                   "salir del modo", "sali del modo", "salir modo", "volver al modo",
-                  "regresa", "volve", "volver a atender", "dejar de probar"]
+                  "regresa", "volver a atender", "dejar de probar"]
 
 SYSTEM_PROMPT = """
 Sos Fer, vendedor de verdad de Guaranistore, una tienda paraguaya. Sos una PERSONA, no un bot: con caracter, historia y corazon. Nadie deberia sospechar que del otro lado hay un sistema. Antes que vendedor, sos gente. Tu norte: acompanar a la persona hasta que se lleve su Depiladora IPL, tratandola tan bien que quiera comprarte a VOS.
@@ -55,17 +54,26 @@ TU CORAZON (empatia): si te cuentan algo personal ("es para mi hija enferma", "n
 
 COMO ESCRIBIS: mensajes CORTOS (1 a 3 lineas). Voseo paraguayo. Guarani muy de vez en cuando. UNA pregunta por vez. Espeja el tono del cliente.
 
-EMOJIS: pocos pero expresivos en momentos clave (saludo, cierre, agradecer): 🎉🙌😍👍🇵🇾. Nunca una fila de emojis.
+EMOJIS: pocos pero expresivos en momentos clave (saludo, cierre, agradecer): un emoji lindo alcanza. Nunca una fila de emojis.
 
-FOTOS DEL PRODUCTO: cuando el cliente quiera ver el producto ("tenes foto?", "mostrame", "como es?"), agrega [FOTOS]: el codigo enviara 3 fotos reales y borrara la etiqueta. Si pide ver MAS, agrega [MASFOTOS] (3 fotos mas). Acompana con texto corto y calido ("Mira, te paso unas fotos 👇"). No repitas [FOTOS] si ya las mandaste, salvo que pida de nuevo.
+FOTOS DEL PRODUCTO: cuando el cliente quiera ver el producto ("tenes foto?", "mostrame", "como es?"), agrega [FOTOS]: el codigo enviara 3 fotos reales y borrara la etiqueta. Si pide ver MAS, agrega [MASFOTOS] (3 fotos mas). Acompana con texto corto y calido. No repitas [FOTOS] si ya las mandaste, salvo que pida de nuevo.
 
-VIDEO DEL PRODUCTO: si pide un video ("tenes video?", "en video", "mostrame funcionando"), agrega [VIDEO]: el codigo enviara el link de YouTube. Acompana con texto corto ("Te paso un video asi lo ves funcionando 👇").
+VIDEO DEL PRODUCTO: si pide un video ("tenes video?", "en video", "mostrame funcionando"), agrega [VIDEO]: el codigo enviara el link de YouTube. Acompana con texto corto.
 
 MENSAJES CORTOS: "precio"/"cuanto?" -> precio AL TOQUE y una pregunta. "hola" -> saluda y pregunta en que ayudas.
 
 EL PRODUCTO: Depiladora IPL de Luz Pulsada (Black Word). Definitiva, en casa, indolora, todo el cuerpo. Misma tecnologia IPL de los centros de estetica. Kit: gafas, afeitadora, manual y caja. Precio: Gs. 280.000. Garantia: 5 dias. Entrega: 1 a 3 dias. Pago CONTRA ENTREGA en 24 ciudades. EXCEPCION: Minga Pora, Curuguaty, Katuete y Salto del Guaira solo con transferencia anticipada.
 
 TU GANCHO: el ahorro. La gente gasta todos los meses en depilarse; la IPL es UN solo pago y en pocos meses se pago sola. Deslizalo con ejemplos reales.
+
+PERSUASION (convencer con HONESTIDAD, nunca manipular ni presionar — al paraguayo la presion lo espanta):
+- Tu mayor arma de confianza es el PAGO CONTRA ENTREGA: "pagas recien cuando lo tenes en la mano". Usalo para derribar la desconfianza de comprar online; es tu prueba de que no hay truco.
+- Reforza con la GARANTIA de 5 dias: "si no te convence, tenes respaldo".
+- Ayuda a la persona a IMAGINARSE con el producto y su beneficio: "imaginate no tener que depilarte nunca mas, ni gastar en cera todos los meses".
+- Ante la DUDA no empujes mas fuerte: preguntá que la frena ("que es lo que mas te hace dudar?") y resolve ESA objecion puntual. La duda casi siempre es el precio, si funciona, o desconfianza; cada una tiene su respuesta honesta.
+- Da valor antes de pedir la venta: un consejo util, resolver una duda sin condicion. La gente le compra a quien la ayuda.
+- NUNCA inventes testimonios, cantidades vendidas ni promos que no existan. Convencé con la verdad: si te descubren un invento, perdes la venta y la confianza para siempre.
+- El cierre es la consecuencia natural de una buena charla, no un forcejeo. Si atendes bien, la venta llega sola.
 
 FLUJO: 1) Saludas UNA vez. 2) Escuchas para que/para quien. 3) Muestras valor + ahorro (y fotos/video si sirve). 4) Precio al toque si lo piden. 5) Resolves dudas. 6) Cerras tomando los datos cuando hay interes.
 
@@ -74,6 +82,10 @@ CIERRE (los datos): necesitas SIEMPRE 4 datos, pedidos como charla, de a uno o d
 >>> AVISO DE PEDIDO: cuando tengas los 4 datos Y el cliente CONFIRME, al FINAL agrega EXACTAMENTE (con las barras |):
 [PEDIDO] Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]
 Solo cuando el pedido esta cerrado. El cliente no la vera.
+
+OTROS PRODUCTOS: si el cliente pregunta por un producto que NO es la depiladora IPL, se honesto: por ahora vendes la depiladora, pero decile con amabilidad que le pasas su interes al encargado por si lo consigue. Y al FINAL de tu mensaje agrega EXACTAMENTE:
+[INTERES] <lo que pidio el cliente> [/INTERES]
+El codigo avisa al dueno. El cliente no ve la etiqueta.
 
 HORARIOS: atendes a cualquier hora, sin hacerlo notar.
 
@@ -84,11 +96,14 @@ OBJECIONES: "Funciona?" -> si, IPL con garantia. "Es caro" -> un solo pago, cont
 REGLAS: nunca inventes precios ni datos. Nunca uses el dolor de alguien para vender. No presiones. Amable sin zalameria. No hables de otros productos salvo que pregunten. Nunca digas que sos un bot: sos Fer.
 """
 
-# Prompt para cuando habla el DUENO (Fernando), en modo prueba
 PROMPT_DUENO = """
 Estas hablando con Fernando, tu creador y dueno de Guaranistore, en MODO PRIVADO. NO actues como vendedor. Sos su ASISTENTE de confianza y mano derecha del negocio: hablale con naturalidad, honestidad y de igual a igual, como a un amigo y jefe.
 
-Junto a su mensaje vas a recibir un bloque con DATOS REALES DE VENTAS (de la tabla Pedidos). Usalo para darle reportes concretos cuando pregunte: cuantas ventas hoy o en total, ultimos pedidos, de que ciudad vende mas, etc. Da numeros reales, no inventes. Si te pide sugerencias de que mejorar, analiza esos datos y dale ideas practicas y honestas (no le digas solo lo que quiere oir).
+Junto a su mensaje vas a recibir DATOS REALES DE VENTAS (tabla Pedidos) y un bloque de CONVERSACIONES RECIENTES (charlas reales con clientes).
+
+Con los datos de VENTAS: cuando pregunte, dale reportes concretos (cuantas ventas hoy o en total, ultimos pedidos, de que ciudad vende mas). Numeros reales, no inventes.
+
+Con las CONVERSACIONES: podes mostrarle una charla tal cual si te la pide ("mostrame la ultima charla"), resumirla, o actuar como AUDITOR y decirle honestamente que se podria mejorar (donde se traba Fer, que preguntas no supo responder, en que punto se perdio una venta). Se concreto y honesto, no le digas solo lo que quiere oir. IMPORTANTE: mostrar o analizar una charla es de SOLO LECTURA; no interrumpe ni afecta la conversacion real del cliente.
 
 Tambien lo ayudas a probar el bot: si te pide ver el material, podes usar [FOTOS], [MASFOTOS] o [VIDEO]. NUNCA uses la etiqueta [PEDIDO] en este modo. Se breve y claro.
 """
@@ -141,34 +156,27 @@ def responder(sender, texto):
     en_modo = MODO_DUENO.get(sender, False)
     tiene_clave = bool(CLAVE_DUENO) and CLAVE_DUENO in t_lower
 
-    # --- ENTRAR al modo dueno (palabra secreta en cualquier parte) ---
     if not en_modo and tiene_clave:
         MODO_DUENO[sender] = True
         en_modo = True
         enviar_a_messenger(sender,
-            "🛠️ Listo dueno, entre en MODO PRUEBA. Te hablo como tu asistente, "
-            "no como vendedor. Cuando quieras que vuelva a atender clientes, "
-            "decime: modo vendedor.")
-
-    # --- SALIR del modo dueno ---
+            "Listo dueno, entre en MODO PRUEBA. Te hablo como tu asistente, no como "
+            "vendedor. Cuando quieras que vuelva a atender clientes, decime: modo vendedor.")
     elif en_modo and any(p in t_lower for p in PALABRAS_SALIR):
         MODO_DUENO[sender] = False
         enviar_a_messenger(sender,
-            "🛍️ Listo, volvi al MODO VENDEDOR. Ya atiendo normal a los clientes 👍")
+            "Listo, volvi al MODO VENDEDOR. Ya atiendo normal a los clientes 👍")
         return
 
-    # --- Preparar el texto para la IA ---
     if en_modo:
-        # sacamos la palabra secreta si vino en el mensaje
         if tiene_clave:
             texto_ia = re.sub(re.escape(CLAVE_DUENO), "", texto, flags=re.IGNORECASE).strip()
         else:
             texto_ia = texto.strip()
         if not texto_ia:
-            return  # solo activo el modo, sin instruccion extra
-        contexto = resumen_ventas()
-        texto_con_datos = f"{contexto}\n\nMensaje del dueno: {texto_ia}"
-        respuesta = preguntar_a_gemini([], texto_con_datos, PROMPT_DUENO)
+            return
+        contexto = resumen_ventas() + "\n\n=== CONVERSACIONES RECIENTES ===\n" + leer_conversaciones()
+        respuesta = preguntar_a_gemini([], f"{contexto}\n\nMensaje del dueno: {texto_ia}", PROMPT_DUENO)
     else:
         historial = leer_historial(sender)
         respuesta = preguntar_a_gemini(historial, texto, SYSTEM_PROMPT)
@@ -176,9 +184,10 @@ def responder(sender, texto):
     print(f">>> GEMINI ({'dueno' if en_modo else 'vendedor'}): '{respuesta}'")
 
     if not en_modo:
-        respuesta = revisar_pedido(sender, respuesta)   # Telegram + saca [PEDIDO]
-    respuesta, fotos = revisar_fotos(respuesta)          # saca [FOTOS]/[MASFOTOS]
-    respuesta, video = revisar_video(respuesta)          # saca [VIDEO]
+        respuesta = revisar_pedido(sender, respuesta)
+        respuesta = revisar_interes(sender, respuesta)
+    respuesta, fotos = revisar_fotos(respuesta)
+    respuesta, video = revisar_video(respuesta)
 
     if respuesta:
         enviar_a_messenger(sender, respuesta)
@@ -187,37 +196,52 @@ def responder(sender, texto):
     if video:
         enviar_a_messenger(sender, video)
 
-    # En modo dueno no guardamos, asi no ensucia la memoria de clientes
     if not en_modo:
         guardar(sender, "user", texto)
         guardar(sender, "model", respuesta if respuesta else "(envie material del producto)")
 
 
-# ---- [PEDIDO]: aviso elegante a Telegram + borra la etiqueta
+# ---- [PEDIDO]: aviso a Telegram + registro en tabla + borra la etiqueta
 def revisar_pedido(sender, respuesta):
     m = re.search(r"\[PEDIDO\](.*?)\[/PEDIDO\]", respuesta, re.DOTALL)
     if m:
         resumen = m.group(1).strip()
-        avisar_telegram(formatear_pedido(resumen))   # aviso lindo a Telegram
-        guardar_pedido(resumen)                       # registro en la tabla Pedidos
+        avisar_telegram(formatear_pedido(resumen))
+        enviar_whatsapp(formatear_pedido_whatsapp(resumen))
+        guardar_pedido(resumen)
         respuesta = re.sub(r"\[PEDIDO\].*?\[/PEDIDO\]", "", respuesta, flags=re.DOTALL).strip()
     return respuesta
 
 
-def formatear_pedido(resumen):
+# ---- [INTERES]: si el cliente pide otro producto, avisa al dueno y borra la etiqueta
+def revisar_interes(sender, respuesta):
+    m = re.search(r"\[INTERES\](.*?)\[/INTERES\]", respuesta, re.DOTALL)
+    if m:
+        avisar_telegram("👀 INTERES EN OTRO PRODUCTO\nEl cliente pregunto por: "
+                        + m.group(1).strip() + f"\n(cliente: {sender})")
+        respuesta = re.sub(r"\[INTERES\].*?\[/INTERES\]", "", respuesta, flags=re.DOTALL).strip()
+    return respuesta
+
+
+def _parsear(resumen):
     datos = {}
     for parte in resumen.split("|"):
         if ":" in parte:
             clave, valor = parte.split(":", 1)
             datos[clave.strip().lower()] = valor.strip()
+    return datos
+
+
+def formatear_pedido(resumen):
+    d = _parsear(resumen)
     hora = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
     return (
         "🛍️  NUEVO PEDIDO — Guaranístore\n"
         "━━━━━━━━━━━━━━━\n"
-        f"👤  Nombre:     {datos.get('nombre', '-')}\n"
-        f"📍  Ciudad:     {datos.get('ciudad', '-')}\n"
-        f"📞  Teléfono:   {datos.get('tel', '-')}\n"
-        f"🏠  Dirección:  {datos.get('direccion', '-')}\n"
+        f"👤  Nombre:     {d.get('nombre', '-')}\n"
+        f"📍  Ciudad:     {d.get('ciudad', '-')}\n"
+        f"📞  Teléfono:   {d.get('tel', '-')}\n"
+        f"🏠  Dirección:  {d.get('direccion', '-')}\n"
         "━━━━━━━━━━━━━━━\n"
         "💜  Producto:   Depiladora IPL\n"
         "💰  Total:      Gs. 280.000 (contra entrega)\n"
@@ -225,21 +249,16 @@ def formatear_pedido(resumen):
     )
 
 
-# ---- Guarda el pedido cerrado en la tabla Pedidos de Airtable
 def guardar_pedido(resumen):
-    datos = {}
-    for parte in resumen.split("|"):
-        if ":" in parte:
-            clave, valor = parte.split(":", 1)
-            datos[clave.strip().lower()] = valor.strip()
+    d = _parsear(resumen)
     hora = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
     headers = {"Authorization": f"Bearer {AIRTABLE_KEY}", "Content-Type": "application/json"}
     cuerpo = {"fields": {
-        "Nombre":    datos.get("nombre", ""),
-        "Ciudad":    datos.get("ciudad", ""),
-        "Telefono":  datos.get("tel", ""),
-        "Direccion": datos.get("direccion", ""),
+        "Nombre":    d.get("nombre", ""),
+        "Ciudad":    d.get("ciudad", ""),
+        "Telefono":  d.get("tel", ""),
+        "Direccion": d.get("direccion", ""),
         "Total":     "Gs. 280.000 (contra entrega)",
         "Fecha":     hora,
         "Estado":    "Nuevo",
@@ -251,20 +270,15 @@ def guardar_pedido(resumen):
         print(">>> PEDIDO guardado en la tabla Pedidos")
 
 
-# ---- Lee la tabla Pedidos (para los reportes del dueno)
-def leer_pedidos():
+# ---- Reporte de ventas para el dueno
+def resumen_ventas():
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
     headers = {"Authorization": f"Bearer {AIRTABLE_KEY}"}
     r = requests.get(url, headers=headers, params={"maxRecords": 100}, timeout=10)
     if r.status_code != 200:
         print(">>> AIRTABLE (leer pedidos) error:", r.status_code, r.text)
-        return []
-    return [reg.get("fields", {}) for reg in r.json().get("records", [])]
-
-
-# ---- Arma un resumen de ventas para pasarselo al asistente del dueno
-def resumen_ventas():
-    pedidos = leer_pedidos()
+        return "DATOS DE VENTAS: (no pude leer la tabla Pedidos)"
+    pedidos = [reg.get("fields", {}) for reg in r.json().get("records", [])]
     hoy = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y")
     total = len(pedidos)
     de_hoy = sum(1 for p in pedidos if str(p.get("Fecha", "")).startswith(hoy))
@@ -279,6 +293,36 @@ def resumen_ventas():
             f"Ultimos pedidos:\n{detalle}")
 
 
+# ---- Lee charlas recientes para el auditor / ver conversaciones
+def leer_conversaciones(max_registros=100, ultimos_contactos=5, msgs_por_contacto=14):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}"}
+    r = requests.get(url, headers=headers, params={"maxRecords": max_registros}, timeout=10)
+    if r.status_code != 200:
+        print(">>> AIRTABLE (leer charlas) error:", r.status_code, r.text)
+        return "(no pude leer las conversaciones)"
+    orden, charlas = [], {}
+    for reg in r.json().get("records", []):
+        campos = reg.get("fields", {})
+        cid = campos.get("contact_id", "?")
+        texto = campos.get("mensaje_entrante", "")
+        if cid not in charlas:
+            charlas[cid] = []
+            orden.append(cid)
+        if texto.startswith("[bot] "):
+            charlas[cid].append("Fer: " + texto[6:])
+        elif texto.startswith("[user] "):
+            charlas[cid].append("Cliente: " + texto[7:])
+        elif texto:
+            charlas[cid].append("Cliente: " + texto)
+    bloques = []
+    for i, cid in enumerate(orden[-ultimos_contactos:], 1):
+        lineas = charlas[cid][-msgs_por_contacto:]
+        bloques.append(f"--- Charla {i} (cliente {str(cid)[:8]}...) ---\n" + "\n".join(lineas))
+    return "\n\n".join(bloques) if bloques else "(todavia no hay conversaciones)"
+
+
+# ---- [FOTOS]/[MASFOTOS]
 def revisar_fotos(respuesta):
     fotos = []
     if "[FOTOS]" in respuesta:
@@ -344,76 +388,4 @@ def preguntar_a_gemini(historial, texto_nuevo, prompt=SYSTEM_PROMPT):
     }
     r = requests.post(url, json=cuerpo, timeout=30)
     if r.status_code != 200:
-        print(">>> GEMINI error:", r.status_code, r.text)
-        return "Hola! Gracias por escribir a Guaranistore. Ya te atiendo 😊"
-    data = r.json()
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        print(">>> GEMINI raro:", json.dumps(data, ensure_ascii=False))
-        return "Hola! Gracias por escribir a Guaranistore. Ya te atiendo 😊"
-
-
-# ================= MESSENGER =================
-def enviar_a_messenger(sender, texto):
-    for pedazo in partir(texto, 1900):
-        cuerpo = {
-            "recipient": {"id": sender},
-            "messaging_type": "RESPONSE",
-            "message": {"text": pedazo},
-        }
-        r = requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=cuerpo, timeout=10)
-        print(">>> MESSENGER:", r.status_code, r.text)
-
-
-def enviar_foto(sender, url_foto):
-    cuerpo = {
-        "recipient": {"id": sender},
-        "message": {"attachment": {"type": "image",
-                                   "payload": {"url": url_foto, "is_reusable": True}}},
-    }
-    r = requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=cuerpo, timeout=15)
-    print(">>> FOTO:", r.status_code, r.text)
-
-
-def partir(texto, limite):
-    texto = texto.strip()
-    if len(texto) <= limite:
-        return [texto] if texto else ["😊"]
-    pedazos, actual = [], ""
-    for linea in texto.split("\n"):
-        if len(actual) + len(linea) + 1 > limite:
-            pedazos.append(actual.strip())
-            actual = ""
-        actual += linea + "\n"
-    if actual.strip():
-        pedazos.append(actual.strip())
-    return pedazos
-
-
-def marcar_leido(sender):
-    try:
-        requests.post(GRAPH, params={"access_token": PAGE_TOKEN},
-                      json={"recipient": {"id": sender}, "sender_action": "mark_seen"}, timeout=8)
-    except Exception:
-        pass
-
-
-def mostrar_escribiendo(sender):
-    try:
-        requests.post(GRAPH, params={"access_token": PAGE_TOKEN},
-                      json={"recipient": {"id": sender}, "sender_action": "typing_on"}, timeout=8)
-    except Exception:
-        pass
-
-
-# ================= TELEGRAM =================
-def avisar_telegram(texto):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT, "text": texto}, timeout=10)
-    print(">>> TELEGRAM:", r.status_code, r.text)
-
-
-@app.get("/")
-def inicio():
-    return {"estado": "Fer esta prendido y esperando mensajes"}
+        prin
