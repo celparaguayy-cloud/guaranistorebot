@@ -1,9 +1,8 @@
 """
-FER BOT 3.0 — catálogo dinámico desde Airtable
-IA (Gemini) + memoria (Airtable) + fotos + video
-+ aviso de pedidos a Telegram
-+ registro de pedidos en tabla
-+ modo dueño
+FER BOT 3.0
+Catálogo dinámico desde Airtable
+Gemini + memoria Airtable + fotos + video
+Pedidos + Telegram + modo dueño
 """
 
 import os
@@ -23,17 +22,15 @@ app = FastAPI()
 # CONFIGURACIÓN
 # ============================================================
 
-VERIFY_TOKEN = os.environ.get(
-    "VERIFY_TOKEN",
-    "fer123"
-)
+VERIFY_TOKEN = os.environ.get("VERIFY_TOKEN", "fer123").strip()
 
 PAGE_TOKEN = os.environ["PAGE_TOKEN"].strip()
 GEMINI_KEY = os.environ["GEMINI_KEY"].strip()
 AIRTABLE_KEY = os.environ["AIRTABLE_KEY"].strip()
 AIRTABLE_BASE = os.environ["AIRTABLE_BASE"].strip()
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"].strip()
-TELEGRAM_CHAT = os.environ["TELEGRAM_CHAT"].strip()
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+TELEGRAM_CHAT = os.environ.get("TELEGRAM_CHAT", "").strip()
 
 CLAVE_DUENO = os.environ.get(
     "CLAVE_DUENO",
@@ -55,25 +52,19 @@ TABLA = "Conversaciones"
 TABLA_PEDIDOS = "Pedidos"
 TABLA_CATALOGO = "Catalogo_Espejo"
 
-
-GRAPH = (
-    "https://graph.facebook.com/"
-    "v21.0/me/messages"
-)
+GRAPH = "https://graph.facebook.com/v21.0/me/messages"
 
 
 # ============================================================
-# VARIABLES GLOBALES
+# MEMORIA TEMPORAL
 # ============================================================
 
 MENSAJES_VISTOS = set()
 
 MODO_DUENO = {}
 
-# Último producto real consultado por cada cliente.
 ULTIMO_PRODUCTO_CONSULTADO = {}
 
-# Producto que el cliente está comprando.
 PRODUCTO_ELEGIDO_POR_CLIENTE = {}
 
 
@@ -93,7 +84,7 @@ PALABRAS_SALIR = [
 
 
 # ============================================================
-# PROMPT DEL VENDEDOR
+# PROMPT VENDEDOR
 # ============================================================
 
 SYSTEM_PROMPT = """
@@ -135,18 +126,12 @@ agregá exactamente:
 
 [MASFOTOS]
 
-El sistema va a enviar las fotos reales
-del producto consultado.
-
 VIDEO:
 
 Si pide video,
-agregá:
+agregá exactamente:
 
 [VIDEO]
-
-El sistema va a enviar el video real
-del producto si existe.
 
 PRODUCTOS:
 
@@ -158,7 +143,7 @@ en la tabla Catalogo_Espejo.
 Nunca digas que solo vendés la depiladora IPL.
 
 Si el cliente menciona un producto,
-pregunta por su precio,
+pregunta por precio,
 stock,
 disponibilidad,
 características,
@@ -177,16 +162,6 @@ usá:
 
 [INTERES] lo que pidió el cliente [/INTERES]
 
-PRECIO:
-
-Si pregunta el precio,
-respondé el precio real del catálogo.
-
-STOCK:
-
-Si pregunta si hay stock,
-respondé según el catálogo.
-
 PEDIDOS:
 
 Necesitás:
@@ -201,29 +176,19 @@ agregá exactamente:
 
 [PEDIDO] Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]
 
-Solo cuando el pedido esté cerrado.
-
-HONESTIDAD:
-
+No inventes precios.
+No inventes stock.
+No inventes promociones.
+No inventes características.
 No inventes testimonios.
 
-No inventes stock.
-
-No inventes precios.
-
-No inventes promociones.
-
-No inventes características.
-
+Tratà bien a la persona.
 No presiones.
-
-Tratá bien a la persona.
-
 """
 
 
 # ============================================================
-# PROMPT DEL DUEÑO
+# PROMPT DUEÑO
 # ============================================================
 
 PROMPT_DUENO = """
@@ -258,9 +223,7 @@ No uses [PEDIDO] en este modo.
 Podés usar:
 
 [FOTOS]
-
 [MASFOTOS]
-
 [VIDEO]
 
 si Fernando quiere probar material.
@@ -269,7 +232,19 @@ si Fernando quiere probar material.
 
 
 # ============================================================
-# WEBHOOK
+# RUTA PRINCIPAL
+# ============================================================
+
+@app.get("/")
+def inicio():
+    return {
+        "status": "online",
+        "bot": "FER BOT 3.0"
+    }
+
+
+# ============================================================
+# WEBHOOK VERIFICACIÓN
 # ============================================================
 
 @app.get("/webhook")
@@ -277,14 +252,10 @@ def verificar(request: Request):
 
     params = request.query_params
 
-    if params.get(
-        "hub.verify_token"
-    ) == VERIFY_TOKEN:
+    if params.get("hub.verify_token") == VERIFY_TOKEN:
 
         return Response(
-            content=params.get(
-                "hub.challenge"
-            ),
+            content=params.get("hub.challenge"),
             media_type="text/plain"
         )
 
@@ -293,6 +264,10 @@ def verificar(request: Request):
         status_code=403
     )
 
+
+# ============================================================
+# WEBHOOK MENSAJES
+# ============================================================
 
 @app.post("/webhook")
 async def recibir(request: Request):
@@ -307,68 +282,46 @@ async def recibir(request: Request):
         )
     )
 
-    for entry in data.get(
-        "entry",
-        []
-    ):
+    for entry in data.get("entry", []):
 
-        for evento in entry.get(
-            "messaging",
-            []
-        ):
+        for evento in entry.get("messaging", []):
 
             sender = evento.get(
                 "sender",
                 {}
-            ).get(
-                "id"
-            )
+            ).get("id")
 
             mensaje = evento.get(
                 "message",
                 {}
-
             )
 
-            mid = mensaje.get(
-                "mid"
-            )
+            mid = mensaje.get("mid")
 
             if mid and mid in MENSAJES_VISTOS:
 
-                print(
-                    ">>> MENSAJE REPETIDO"
-                )
+                print(">>> MENSAJE REPETIDO")
 
                 continue
 
             if mid:
 
-                MENSAJES_VISTOS.add(
-                    mid
-                )
+                MENSAJES_VISTOS.add(mid)
 
-                if len(
-                    MENSAJES_VISTOS
-                ) > 500:
+                if len(MENSAJES_VISTOS) > 500:
 
                     MENSAJES_VISTOS.clear()
 
             if "text" not in mensaje:
 
-                print(
-                    ">>> EVENTO SIN TEXTO"
-                )
+                print(">>> EVENTO SIN TEXTO")
 
                 continue
 
-            texto = mensaje[
-                "text"
-            ]
+            texto = mensaje["text"]
 
             print(
-                f">>> TEXTO: '{texto}' "
-                f"DE {sender}"
+                f">>> TEXTO: '{texto}' DE {sender}"
             )
 
             try:
@@ -397,18 +350,11 @@ async def recibir(request: Request):
 # RESPONDER
 # ============================================================
 
-def responder(
-    sender,
-    texto
-):
+def responder(sender, texto):
 
-    marcar_leido(
-        sender
-    )
+    marcar_leido(sender)
 
-    mostrar_escribiendo(
-        sender
-    )
+    mostrar_escribiendo(sender)
 
     t_lower = texto.lower()
 
@@ -418,21 +364,18 @@ def responder(
     )
 
     tiene_clave = (
-        bool(
-            CLAVE_DUENO
-        )
-        and
-        CLAVE_DUENO in t_lower
+        bool(CLAVE_DUENO)
+        and CLAVE_DUENO in t_lower
     )
 
 
+    # ========================================================
     # ENTRAR AL MODO DUEÑO
+    # ========================================================
 
     if not en_modo and tiene_clave:
 
-        MODO_DUENO[
-            sender
-        ] = True
+        MODO_DUENO[sender] = True
 
         enviar_a_messenger(
             sender,
@@ -444,16 +387,16 @@ def responder(
         return
 
 
+    # ========================================================
     # SALIR DEL MODO DUEÑO
+    # ========================================================
 
     if en_modo and any(
         palabra in t_lower
         for palabra in PALABRAS_SALIR
     ):
 
-        MODO_DUENO[
-            sender
-        ] = False
+        MODO_DUENO[sender] = False
 
         enviar_a_messenger(
             sender,
@@ -470,45 +413,32 @@ def responder(
 
     if en_modo:
 
+        texto_ia = texto
+
         if tiene_clave:
 
             texto_ia = re.sub(
-                re.escape(
-                    CLAVE_DUENO
-                ),
+                re.escape(CLAVE_DUENO),
                 "",
                 texto,
                 flags=re.IGNORECASE
             ).strip()
 
-        else:
-
-            texto_ia = texto.strip()
-
-
         if not texto_ia:
 
             return
 
-
         contexto = (
             resumen_ventas()
-            +
-            "\n\n=== CONVERSACIONES RECIENTES ===\n"
-            +
-            leer_conversaciones()
+            + "\n\n=== CONVERSACIONES RECIENTES ===\n"
+            + leer_conversaciones()
         )
-
 
         respuesta = preguntar_a_gemini(
             [],
-            (
-                contexto
-                +
-                "\n\nMensaje del dueño: "
-                +
-                texto_ia
-            ),
+            contexto
+            + "\n\nMensaje del dueño:\n"
+            + texto_ia,
             PROMPT_DUENO
         )
 
@@ -519,10 +449,7 @@ def responder(
 
     else:
 
-        historial = leer_historial(
-            sender
-        )
-
+        historial = leer_historial(sender)
 
         respuesta = preguntar_a_gemini(
             historial,
@@ -530,22 +457,17 @@ def responder(
             SYSTEM_PROMPT
         )
 
-
         producto_consultado = (
             extraer_producto_consultado(
                 respuesta
             )
         )
 
-
         if producto_consultado:
 
-            datos_producto = (
-                consultar_producto(
-                    producto_consultado
-                )
+            datos_producto = consultar_producto(
+                producto_consultado
             )
-
 
             if datos_producto:
 
@@ -553,41 +475,36 @@ def responder(
                     sender
                 ] = datos_producto
 
-
                 PRODUCTO_ELEGIDO_POR_CLIENTE[
                     sender
                 ] = datos_producto
 
-
-                respuesta = (
-                    generar_respuesta_con_producto(
-                        historial,
-                        texto,
-                        datos_producto
-                    )
+                respuesta = generar_respuesta_con_producto(
+                    historial,
+                    texto,
+                    datos_producto
                 )
-
 
             else:
 
-                ULTIMO_PRODUCTO_CONSULTADO.pop(
-                    sender,
-                    None
-                )
-
-
-                respuesta = revisar_interes(
-                    sender,
-                    respuesta
+                respuesta = (
+                    f"No encontré {producto_consultado} "
+                    "en el catálogo actual. "
+                    "[INTERES] "
+                    + texto
+                    + " [/INTERES]"
                 )
 
 
     print(
-        f">>> GEMINI: {respuesta}"
+        ">>> GEMINI:",
+        respuesta
     )
 
 
+    # ========================================================
     # PEDIDO
+    # ========================================================
 
     if not en_modo:
 
@@ -596,14 +513,15 @@ def responder(
             respuesta
         )
 
-
         respuesta = revisar_interes(
             sender,
             respuesta
         )
 
 
+    # ========================================================
     # FOTOS
+    # ========================================================
 
     respuesta, fotos = revisar_fotos(
         sender,
@@ -611,7 +529,9 @@ def responder(
     )
 
 
+    # ========================================================
     # VIDEO
+    # ========================================================
 
     respuesta, video = revisar_video(
         sender,
@@ -619,7 +539,9 @@ def responder(
     )
 
 
-    # ENVÍA TEXTO
+    # ========================================================
+    # ENVIAR TEXTO
+    # ========================================================
 
     if respuesta:
 
@@ -629,7 +551,9 @@ def responder(
         )
 
 
-    # ENVÍA FOTOS
+    # ========================================================
+    # ENVIAR FOTOS
+    # ========================================================
 
     for foto in fotos:
 
@@ -639,7 +563,9 @@ def responder(
         )
 
 
-    # ENVÍA VIDEO
+    # ========================================================
+    # ENVIAR VIDEO
+    # ========================================================
 
     if video:
 
@@ -649,7 +575,9 @@ def responder(
         )
 
 
-    # GUARDA CONVERSACIÓN
+    # ========================================================
+    # GUARDAR CONVERSACIÓN
+    # ========================================================
 
     if not en_modo:
 
@@ -658,7 +586,6 @@ def responder(
             "user",
             texto
         )
-
 
         guardar(
             sender,
@@ -682,13 +609,11 @@ def preguntar_a_gemini(
 
     partes = []
 
-
     partes.append(
         {
             "text": system_prompt
         }
     )
-
 
     for item in historial[-20:]:
 
@@ -702,41 +627,33 @@ def preguntar_a_gemini(
             ""
         )
 
-
-        if rol == "user":
-
-            prefijo = "Cliente: "
-
-        else:
-
-            prefijo = "Fer: "
-
+        prefijo = (
+            "Cliente: "
+            if rol == "user"
+            else
+            "Fer: "
+        )
 
         partes.append(
             {
                 "text":
                 prefijo
-                +
-                str(
-                    contenido
-                )
+                + str(contenido)
             }
         )
-
 
     partes.append(
         {
             "text":
             "Mensaje actual:\n"
-            +
-            texto
+            + texto
         }
     )
 
 
     url = (
         "https://generativelanguage.googleapis.com/"
-        "v1beta/models/gemini-2.0-flash:generateContent"
+        "v1beta/models/gemini-2.5-flash:generateContent"
         f"?key={GEMINI_KEY}"
     )
 
@@ -762,11 +679,26 @@ def preguntar_a_gemini(
     }
 
 
-    r = requests.post(
-        url,
-        json=payload,
-        timeout=45
-    )
+    try:
+
+        r = requests.post(
+            url,
+            json=payload,
+            timeout=45
+        )
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR CONECTANDO GEMINI:",
+            e
+        )
+
+        return (
+            "Perdón, tuve un pequeño problema "
+            "para responderte. "
+            "¿Me escribís de nuevo, por favor?"
+        )
 
 
     if r.status_code != 200:
@@ -776,7 +708,6 @@ def preguntar_a_gemini(
             r.status_code,
             r.text
         )
-
 
         return (
             "Perdón, tuve un pequeño problema "
@@ -791,21 +722,11 @@ def preguntar_a_gemini(
     try:
 
         return (
-            data[
-                "candidates"
-            ][
-                0
-            ][
-                "content"
-            ][
-                "parts"
-            ][
-                0
-            ][
-                "text"
-            ].strip()
+            data["candidates"][0]
+            ["content"]["parts"][0]
+            ["text"]
+            .strip()
         )
-
 
     except Exception:
 
@@ -814,7 +735,6 @@ def preguntar_a_gemini(
             data
         )
 
-
         return (
             "Perdón, no pude procesar eso ahora. "
             "¿Me escribís de nuevo, por favor?"
@@ -822,7 +742,7 @@ def preguntar_a_gemini(
 
 
 # ============================================================
-# CONSULTA DE PRODUCTOS
+# PRODUCTOS
 # ============================================================
 
 def extraer_producto_consultado(
@@ -835,13 +755,9 @@ def extraer_producto_consultado(
         re.IGNORECASE | re.DOTALL
     )
 
-
     if m:
 
-        return m.group(
-            1
-        ).strip()
-
+        return m.group(1).strip()
 
     return None
 
@@ -856,7 +772,6 @@ def consultar_producto(
         )
     )
 
-
     if error:
 
         print(
@@ -865,7 +780,6 @@ def consultar_producto(
         )
 
         return None
-
 
     if not datos:
 
@@ -876,15 +790,10 @@ def consultar_producto(
 
         return None
 
-
     print(
         ">>> PRODUCTO ENCONTRADO:",
-        datos.get(
-            "producto_id",
-            producto
-        )
+        _nombre_producto(datos)
     )
-
 
     return datos
 
@@ -897,7 +806,6 @@ def generar_respuesta_con_producto(
 
     datos_limpios = {}
 
-
     for clave, valor in datos.items():
 
         if valor not in (
@@ -907,9 +815,7 @@ def generar_respuesta_con_producto(
             {}
         ):
 
-            datos_limpios[
-                clave
-            ] = valor
+            datos_limpios[clave] = valor
 
 
     contexto_producto = json.dumps(
@@ -940,12 +846,11 @@ REGLAS:
 - No inventes precio.
 - No inventes stock.
 - No inventes características.
-- Si pregunta el precio, responde el precio real.
-- Si pregunta disponibilidad, responde según Airtable.
+- Si pregunta precio, usa el precio real.
+- Si pregunta disponibilidad, usa el dato real.
 - Si pide fotos, agrega exactamente [FOTOS].
 - Si pide más fotos, agrega exactamente [MASFOTOS].
-- Si pide video y existe URL de video, agrega [VIDEO].
-- Si ya pidió fotos, no preguntes si quiere verlas.
+- Si pide video, agrega [VIDEO] solamente si existe una URL de video.
 - Respondé corto y natural.
 - Usá español paraguayo.
 
@@ -960,76 +865,48 @@ REGLAS:
 
 
 # ============================================================
-# AIRTABLE — BUSCAR PRODUCTO
+# BUSCAR PRODUCTO EN AIRTABLE
 # ============================================================
 
-def _normalizar_texto(
-    valor
-):
+def _normalizar_texto(valor):
 
     if valor is None:
 
         return ""
 
-
-    if isinstance(
-        valor,
-        list
-    ):
+    if isinstance(valor, list):
 
         return " ".join(
-            _normalizar_texto(
-                v
-            )
+            _normalizar_texto(v)
             for v in valor
         )
 
-
-    if isinstance(
-        valor,
-        dict
-    ):
+    if isinstance(valor, dict):
 
         return " ".join(
-            _normalizar_texto(
-                v
-            )
+            _normalizar_texto(v)
             for v in valor.values()
         )
 
-
-    return str(
-        valor
-    ).strip()
+    return str(valor).strip()
 
 
-def _nombre_producto(
-    fields
-):
+def _nombre_producto(fields):
 
     posibles = [
 
         "producto_id",
-
         "Producto",
-
         "producto",
-
         "Nombre",
-
         "nombre",
-
         "name"
 
     ]
 
-
     for campo in posibles:
 
-        valor = fields.get(
-            campo
-        )
-
+        valor = fields.get(campo)
 
         if valor not in (
             None,
@@ -1040,7 +917,6 @@ def _nombre_producto(
                 valor
             )
 
-
     return ""
 
 
@@ -1049,15 +925,10 @@ def _encontrar_producto_en_catalogo(
 ):
 
     url = (
-        "https://api.airtable.com/v0/"
-        +
-        AIRTABLE_BASE
-        +
-        "/"
-        +
-        TABLA_CATALOGO
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE}/"
+        f"{TABLA_CATALOGO}"
     )
-
 
     headers = {
 
@@ -1065,7 +936,6 @@ def _encontrar_producto_en_catalogo(
         f"Bearer {AIRTABLE_KEY}"
 
     }
-
 
     registros = []
 
@@ -1078,12 +948,9 @@ def _encontrar_producto_en_catalogo(
             "pageSize": 100
         }
 
-
         if offset:
 
-            params[
-                "offset"
-            ] = offset
+            params["offset"] = offset
 
 
         r = requests.get(
@@ -1101,7 +968,6 @@ def _encontrar_producto_en_catalogo(
                 r.status_code,
                 r.text
             )
-
 
             return (
                 None,
@@ -1151,7 +1017,6 @@ def _encontrar_producto_en_catalogo(
             {}
         )
 
-
         nombre = _nombre_producto(
             fields
         ).lower()
@@ -1170,7 +1035,6 @@ def _encontrar_producto_en_catalogo(
             "fields",
             {}
         )
-
 
         nombre = _nombre_producto(
             fields
@@ -1198,9 +1062,7 @@ def _encontrar_producto_en_catalogo(
             flags=re.IGNORECASE
         )
 
-        if len(
-            palabra
-        ) >= 3
+        if len(palabra) >= 3
 
     ]
 
@@ -1217,7 +1079,6 @@ def _encontrar_producto_en_catalogo(
             {}
         )
 
-
         nombre = _nombre_producto(
             fields
         ).lower()
@@ -1233,13 +1094,9 @@ def _encontrar_producto_en_catalogo(
 
 
         puntaje = sum(
-
             1
-
             for palabra in palabras
-
             if palabra in palabras_nombre
-
         )
 
 
@@ -1257,159 +1114,9 @@ def _encontrar_producto_en_catalogo(
 
     return None, None
 
-# ============================================================
-# FACEBOOK MESSENGER
-# ============================================================
-
-def marcar_leido(sender):
-
-    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
-
-    payload = {
-        "recipient": {
-            "id": sender
-        },
-        "sender_action": "mark_seen"
-    }
-
-    r = requests.post(
-        url,
-        json=payload,
-        timeout=15
-    )
-
-    if r.status_code != 200:
-
-        print(
-            ">>> ERROR MARCAR LEIDO:",
-            r.status_code,
-            r.text
-        )
-
-
-def mostrar_escribiendo(sender):
-
-    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
-
-    payload = {
-        "recipient": {
-            "id": sender
-        },
-        "sender_action": "typing_on"
-    }
-
-    r = requests.post(
-        url,
-        json=payload,
-        timeout=15
-    )
-
-    if r.status_code != 200:
-
-        print(
-            ">>> ERROR TYPING:",
-            r.status_code,
-            r.text
-        )
-
-
-def enviar_a_messenger(
-    sender,
-    texto
-):
-
-    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
-
-    payload = {
-
-        "recipient": {
-            "id": sender
-        },
-
-        "message": {
-            "text": texto
-        }
-
-    }
-
-    r = requests.post(
-        url,
-        json=payload,
-        timeout=20
-    )
-
-    if r.status_code != 200:
-
-        print(
-            ">>> ERROR ENVIANDO MENSAJE:",
-            r.status_code,
-            r.text
-        )
-
-    else:
-
-        print(
-            ">>> MENSAJE ENVIADO"
-        )
-
-
-def enviar_foto(
-    sender,
-    url_foto
-):
-
-    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
-
-    payload = {
-
-        "recipient": {
-            "id": sender
-        },
-
-        "message": {
-
-            "attachment": {
-
-                "type": "image",
-
-                "payload": {
-
-                    "url": url_foto,
-
-                    "is_reusable": True
-
-                }
-
-            }
-
-        }
-
-    }
-
-    r = requests.post(
-        url,
-        json=payload,
-        timeout=30
-    )
-
-    if r.status_code != 200:
-
-        print(
-            ">>> ERROR ENVIANDO FOTO:",
-            r.status_code,
-            r.text
-        )
-
-    else:
-
-        print(
-            ">>> FOTO ENVIADA:",
-            url_foto
-        )
-
 
 # ============================================================
-# FOTOS DINÁMICAS DEL PRODUCTO
+# FOTOS DINÁMICAS
 # ============================================================
 
 def obtener_fotos_producto(
@@ -1427,6 +1134,13 @@ def obtener_fotos_producto(
         "url_foto_5",
         "url_foto_6",
 
+        "URL_Foto_1",
+        "URL_Foto_2",
+        "URL_Foto_3",
+        "URL_Foto_4",
+        "URL_Foto_5",
+        "URL_Foto_6",
+
         "foto_1",
         "foto_2",
         "foto_3",
@@ -1434,108 +1148,38 @@ def obtener_fotos_producto(
         "foto_5",
         "foto_6",
 
-        "URL Foto 1",
-        "URL Foto 2",
-        "URL Foto 3",
-        "URL Foto 4",
-        "URL Foto 5",
-        "URL Foto 6",
-
-        "Foto 1",
-        "Foto 2",
-        "Foto 3",
-        "Foto 4",
-        "Foto 5",
-        "Foto 6",
-
     ]
+
 
     fotos = []
 
+
     for campo in posibles_campos:
 
-        valor = datos.get(
+        url = datos.get(
             campo
         )
 
-        if not valor:
 
-            continue
-
-        if isinstance(
-            valor,
-            list
-        ):
-
-            for item in valor:
-
-                if isinstance(
-                    item,
-                    dict
-                ):
-
-                    url = (
-                        item.get(
-                            "url"
-                        )
-                        or
-                        item.get(
-                            "thumbnails",
-                            {}
-                        )
-                        .get(
-                            "large",
-                            {}
-                        )
-                        .get(
-                            "url"
-                        )
-                    )
-
-                else:
-
-                    url = str(
-                        item
-                    )
-
-                if url and str(
-                    url
-                ).startswith(
-                    "http"
-                ):
-
-                    fotos.append(
-                        str(
-                            url
-                        ).strip()
-                    )
-
-        else:
+        if url:
 
             url = str(
-                valor
+                url
             ).strip()
+
 
             if url.startswith(
                 "http"
             ):
 
-                fotos.append(
-                    url
-                )
+                if url not in fotos:
 
-    # Elimina duplicadas
-    fotos_limpias = []
+                    fotos.append(
+                        url
+                    )
 
-    for foto in fotos:
 
-        if foto not in fotos_limpias:
-
-            fotos_limpias.append(
-                foto
-            )
-
-    return fotos_limpias[
+    return fotos[
         desde:
         desde + cantidad
     ]
@@ -1554,41 +1198,28 @@ def revisar_fotos(
         )
     )
 
+
     if "[FOTOS]" in respuesta:
 
         if producto:
 
-            fotos.extend(
-                obtener_fotos_producto(
-                    producto,
-                    cantidad=3,
-                    desde=0
-                )
+            fotos += obtener_fotos_producto(
+                producto,
+                cantidad=3,
+                desde=0
             )
 
-        else:
-
-            print(
-                ">>> NO HAY PRODUCTO PARA FOTOS"
-            )
 
     if "[MASFOTOS]" in respuesta:
 
         if producto:
 
-            fotos.extend(
-                obtener_fotos_producto(
-                    producto,
-                    cantidad=3,
-                    desde=3
-                )
+            fotos += obtener_fotos_producto(
+                producto,
+                cantidad=3,
+                desde=3
             )
 
-        else:
-
-            print(
-                ">>> NO HAY PRODUCTO PARA MAS FOTOS"
-            )
 
     respuesta = (
         respuesta
@@ -1603,277 +1234,76 @@ def revisar_fotos(
         .strip()
     )
 
+
     return respuesta, fotos
 
 
+# ============================================================
+# VIDEO DINÁMICO
+# ============================================================
+
 def revisar_video(
+    sender,
     respuesta
 ):
 
     video = None
 
-    if "[VIDEO]" in respuesta:
-
-        producto = None
-
-        # El video se busca desde el último producto
-        # utilizado por el cliente en responder().
-        #
-        # Esta función mantiene compatibilidad
-        # con el flujo actual.
-
-        respuesta = (
-            respuesta
-            .replace(
-                "[VIDEO]",
-                ""
-            )
-            .strip()
+    producto = (
+        ULTIMO_PRODUCTO_CONSULTADO.get(
+            sender
         )
+    )
+
+
+    if "[VIDEO]" in respuesta and producto:
+
+        posibles_campos = [
+
+            "url_video",
+            "URL_video",
+            "video",
+            "Video",
+            "url_video_1",
+            "URL Video",
+
+        ]
+
+
+        for campo in posibles_campos:
+
+            url = producto.get(
+                campo
+            )
+
+
+            if url:
+
+                url = str(
+                    url
+                ).strip()
+
+
+                if url.startswith(
+                    "http"
+                ):
+
+                    video = url
+
+                    break
+
+
+    respuesta = (
+        respuesta
+        .replace(
+            "[VIDEO]",
+            ""
+        )
+        .strip()
+    )
+
 
     return respuesta, video
-
-
-# ============================================================
-# HISTORIAL DE CONVERSACIONES
-# ============================================================
-
-def leer_historial(
-    sender,
-    limite=20
-):
-
-    url = (
-        f"https://api.airtable.com/v0/"
-        f"{AIRTABLE_BASE}/"
-        f"{TABLA}"
-    )
-
-    headers = {
-
-        "Authorization":
-        f"Bearer {AIRTABLE_KEY}"
-
-    }
-
-    params = {
-
-        "maxRecords": 100,
-
-        "filterByFormula":
-        f"{{contact_id}}='{sender}'"
-
-    }
-
-    r = requests.get(
-
-        url,
-
-        headers=headers,
-
-        params=params,
-
-        timeout=15
-
-    )
-
-    if r.status_code != 200:
-
-        print(
-
-            ">>> ERROR LEYENDO HISTORIAL:",
-
-            r.status_code,
-
-            r.text
-
-        )
-
-        return []
-
-    registros = r.json().get(
-
-        "records",
-
-        []
-
-    )
-
-    registros.reverse()
-
-    historial = []
-
-    for registro in registros[-limite:]:
-
-        fields = registro.get(
-
-            "fields",
-
-            {}
-
-        )
-
-        entrante = fields.get(
-
-            "mensaje_entrante",
-
-            ""
-
-        )
-
-        rol = fields.get(
-
-            "rol",
-
-            ""
-
-        )
-
-        if not entrante:
-
-            continue
-
-        if entrante.startswith(
-            "[user] "
-        ):
-
-            historial.append({
-
-                "role": "user",
-
-                "content":
-                entrante[7:]
-
-            })
-
-        elif entrante.startswith(
-            "[bot] "
-        ):
-
-            historial.append({
-
-                "role": "model",
-
-                "content":
-                entrante[6:]
-
-            })
-
-        elif rol == "user":
-
-            historial.append({
-
-                "role": "user",
-
-                "content":
-                entrante
-
-            })
-
-        elif rol == "model":
-
-            historial.append({
-
-                "role": "model",
-
-                "content":
-                entrante
-
-            })
-
-    return historial
-
-
-def guardar(
-    sender,
-    rol,
-    texto
-):
-
-    url = (
-
-        f"https://api.airtable.com/v0/"
-
-        f"{AIRTABLE_BASE}/"
-
-        f"{TABLA}"
-
-    )
-
-    headers = {
-
-        "Authorization":
-        f"Bearer {AIRTABLE_KEY}",
-
-        "Content-Type":
-        "application/json"
-
-    }
-
-    prefijo = (
-
-        "[user] "
-
-        if rol == "user"
-
-        else
-
-        "[bot] "
-
-    )
-
-    cuerpo = {
-
-        "fields": {
-
-            "contact_id":
-            str(sender),
-
-            "mensaje_entrante":
-            prefijo + str(texto),
-
-            "fecha":
-            datetime.now(
-                timezone(
-                    timedelta(
-                        hours=-3
-                    )
-                )
-            ).isoformat()
-
-        }
-
-    }
-
-    r = requests.post(
-
-        url,
-
-        headers=headers,
-
-        json=cuerpo,
-
-        timeout=15
-
-    )
-
-    if r.status_code not in (
-
-        200,
-
-        201
-
-    ):
-
-        print(
-
-            ">>> ERROR GUARDANDO CHAT:",
-
-            r.status_code,
-
-            r.text
-
-        )
 
 
 # ============================================================
@@ -1886,62 +1316,56 @@ def revisar_pedido(
 ):
 
     patron = (
-
         r"\[PEDIDO\](.*?)"
         r"\[/PEDIDO\]"
-
     )
+
 
     m = re.search(
-
         patron,
-
         respuesta,
-
         re.DOTALL
-
     )
+
 
     if m:
 
         resumen = m.group(
-
             1
-
         ).strip()
 
-        avisar_telegram(
 
+        texto_pedido = (
             formatear_pedido(
                 resumen
             )
-
         )
 
-        enviar_whatsapp(
 
+        avisar_telegram(
+            texto_pedido
+        )
+
+
+        enviar_whatsapp(
             formatear_pedido_whatsapp(
                 resumen
             )
-
         )
 
-        guardar_pedido(
 
+        guardar_pedido(
             resumen
         )
 
+
         respuesta = re.sub(
-
             patron,
-
             "",
-
             respuesta,
-
             flags=re.DOTALL
-
         ).strip()
+
 
     return respuesta
 
@@ -1952,22 +1376,21 @@ def _parsear(
 
     datos = {}
 
-    for parte in resumen.split(
-        "|"
-    ):
+
+    for parte in resumen.split("|"):
 
         if ":" in parte:
 
-            clave, valor = (
-                parte.split(
-                    ":",
-                    1
-                )
+            clave, valor = parte.split(
+                ":",
+                1
             )
+
 
             datos[
                 clave.strip().lower()
             ] = valor.strip()
+
 
     return datos
 
@@ -1980,54 +1403,35 @@ def formatear_pedido(
         resumen
     )
 
+
     hora = datetime.now(
-
         timezone(
-
             timedelta(
-
                 hours=-3
-
             )
-
         )
-
     ).strftime(
-
         "%d/%m/%Y %H:%M"
-
     )
+
 
     producto = (
-
-        d.get(
-
-            "producto",
-
-            "Producto del catálogo"
-
+        PRODUCTO_ELEGIDO_POR_CLIENTE.get(
+            "ultimo"
         )
-
     )
+
 
     return (
 
-        "🛍️ NUEVO PEDIDO\n"
-
+        "🛍️ NUEVO PEDIDO — Guaranístore\n"
         "━━━━━━━━━━━━━━━\n"
-
         f"👤 Nombre: {d.get('nombre', '-')}\n"
-
         f"📍 Ciudad: {d.get('ciudad', '-')}\n"
-
         f"📞 Teléfono: {d.get('tel', '-')}\n"
-
         f"🏠 Dirección: {d.get('direccion', '-')}\n"
-
-        f"🛒 Producto: {producto}\n"
-
         "━━━━━━━━━━━━━━━\n"
-
+        "🛒 Pedido confirmado\n"
         f"🕒 {hora} hs"
 
     )
@@ -2041,16 +1445,13 @@ def formatear_pedido_whatsapp(
         resumen
     )
 
+
     return (
 
         "🛍️ NUEVO PEDIDO\n\n"
-
         f"Nombre: {d.get('nombre', '-')}\n"
-
         f"Ciudad: {d.get('ciudad', '-')}\n"
-
         f"Teléfono: {d.get('tel', '-')}\n"
-
         f"Dirección: {d.get('direccion', '-')}"
 
     )
@@ -2064,33 +1465,24 @@ def guardar_pedido(
         resumen
     )
 
+
     hora = datetime.now(
-
         timezone(
-
             timedelta(
-
                 hours=-3
-
             )
-
         )
-
     ).strftime(
-
         "%d/%m/%Y %H:%M"
-
     )
+
 
     url = (
-
         f"https://api.airtable.com/v0/"
-
         f"{AIRTABLE_BASE}/"
-
         f"{TABLA_PEDIDOS}"
-
     )
+
 
     headers = {
 
@@ -2101,6 +1493,7 @@ def guardar_pedido(
         "application/json"
 
     }
+
 
     cuerpo = {
 
@@ -2130,63 +1523,55 @@ def guardar_pedido(
                 ""
             ),
 
-            "Producto":
-            d.get(
-                "producto",
-                "Producto del catálogo"
-            ),
-
             "Fecha":
             hora,
 
             "Estado":
-            "Nuevo"
+            "Nuevo",
 
         }
 
     }
 
-    r = requests.post(
 
-        url,
+    try:
 
-        headers=headers,
-
-        json=cuerpo,
-
-        timeout=15
-
-    )
-
-    if r.status_code not in (
-
-        200,
-
-        201
-
-    ):
-
-        print(
-
-            ">>> ERROR GUARDANDO PEDIDO:",
-
-            r.status_code,
-
-            r.text
-
+        r = requests.post(
+            url,
+            headers=headers,
+            json=cuerpo,
+            timeout=10
         )
 
-    else:
+
+        if r.status_code not in (
+            200,
+            201
+        ):
+
+            print(
+                ">>> ERROR GUARDANDO PEDIDO:",
+                r.status_code,
+                r.text
+            )
+
+        else:
+
+            print(
+                ">>> PEDIDO GUARDADO"
+            )
+
+
+    except Exception as e:
 
         print(
-
-            ">>> PEDIDO GUARDADO"
-
+            ">>> ERROR AIRTABLE PEDIDO:",
+            e
         )
 
 
 # ============================================================
-# INTERÉS EN PRODUCTO NO ENCONTRADO
+# INTERÉS
 # ============================================================
 
 def revisar_interes(
@@ -2195,55 +1580,739 @@ def revisar_interes(
 ):
 
     patron = (
-
         r"\[INTERES\](.*?)"
         r"\[/INTERES\]"
-
     )
+
 
     m = re.search(
-
         patron,
-
         respuesta,
-
         re.DOTALL
-
     )
+
 
     if m:
 
-        interes = m.group(
+        texto_interes = (
+            m.group(
+                1
+            ).strip()
+        )
 
-            1
-
-        ).strip()
 
         avisar_telegram(
 
             "👀 INTERÉS EN PRODUCTO\n"
-
-            + interes
-
-            + "\nCliente: "
-
-            + str(sender)
+            + texto_interes
+            + f"\nCliente: {sender}"
 
         )
 
+
         respuesta = re.sub(
-
             patron,
-
             "",
-
             respuesta,
-
             flags=re.DOTALL
-
         ).strip()
 
+
     return respuesta
+
+
+# ============================================================
+# AIRTABLE — MEMORIA
+# ============================================================
+
+def guardar(
+    sender,
+    role,
+    texto
+):
+
+    url = (
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE}/"
+        f"{TABLA}"
+    )
+
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}",
+
+        "Content-Type":
+        "application/json"
+
+    }
+
+
+    if role == "user":
+
+        mensaje = (
+            "[user] "
+            + texto
+        )
+
+    else:
+
+        mensaje = (
+            "[bot] "
+            + texto
+        )
+
+
+    cuerpo = {
+
+        "fields": {
+
+            "contact_id":
+            str(sender),
+
+            "mensaje_entrante":
+            mensaje,
+
+            "Fecha":
+            datetime.now(
+                timezone(
+                    timedelta(
+                        hours=-3
+                    )
+                )
+            ).isoformat()
+
+        }
+
+    }
+
+
+    try:
+
+        r = requests.post(
+            url,
+            headers=headers,
+            json=cuerpo,
+            timeout=10
+        )
+
+
+        if r.status_code not in (
+            200,
+            201
+        ):
+
+            print(
+                ">>> AIRTABLE GUARDAR ERROR:",
+                r.status_code,
+                r.text
+            )
+
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR GUARDANDO:",
+            e
+        )
+
+
+def leer_historial(
+    sender,
+    limite=20
+):
+
+    url = (
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE}/"
+        f"{TABLA}"
+    )
+
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}"
+
+    }
+
+
+    try:
+
+        r = requests.get(
+            url,
+            headers=headers,
+            params={
+                "maxRecords": 100
+            },
+            timeout=10
+        )
+
+
+        if r.status_code != 200:
+
+            return []
+
+
+        registros = r.json().get(
+            "records",
+            []
+        )
+
+
+        historial = []
+
+
+        for registro in registros:
+
+            fields = registro.get(
+                "fields",
+                {}
+            )
+
+
+            if str(
+                fields.get(
+                    "contact_id",
+                    ""
+                )
+            ) != str(sender):
+
+                continue
+
+
+            mensaje = fields.get(
+                "mensaje_entrante",
+                ""
+            )
+
+
+            if mensaje.startswith(
+                "[user] "
+            ):
+
+                historial.append(
+                    {
+                        "role": "user",
+                        "content": mensaje[7:]
+                    }
+                )
+
+
+            elif mensaje.startswith(
+                "[bot] "
+            ):
+
+                historial.append(
+                    {
+                        "role": "model",
+                        "content": mensaje[6:]
+                    }
+                )
+
+
+        return historial[-limite:]
+
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR LEYENDO HISTORIAL:",
+            e
+        )
+
+        return []
+
+
+# ============================================================
+# REPORTES
+# ============================================================
+
+def resumen_ventas():
+
+    url = (
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE}/"
+        f"{TABLA_PEDIDOS}"
+    )
+
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}"
+
+    }
+
+
+    try:
+
+        r = requests.get(
+            url,
+            headers=headers,
+            params={
+                "maxRecords": 100
+            },
+            timeout=10
+        )
+
+
+        if r.status_code != 200:
+
+            return (
+                "No pude leer la tabla Pedidos."
+            )
+
+
+        pedidos = [
+
+            reg.get(
+                "fields",
+                {}
+            )
+
+            for reg in r.json().get(
+                "records",
+                []
+            )
+
+        ]
+
+
+        hoy = datetime.now(
+            timezone(
+                timedelta(
+                    hours=-3
+                )
+            )
+        ).strftime(
+            "%d/%m/%Y"
+        )
+
+
+        total = len(
+            pedidos
+        )
+
+
+        de_hoy = sum(
+
+            1
+
+            for p in pedidos
+
+            if str(
+                p.get(
+                    "Fecha",
+                    ""
+                )
+            ).startswith(
+                hoy
+            )
+
+        )
+
+
+        lineas = []
+
+
+        for p in pedidos[-15:]:
+
+            lineas.append(
+
+                f"- "
+                f"{p.get('Nombre', '?')} | "
+                f"{p.get('Ciudad', '?')} | "
+                f"{p.get('Fecha', '?')} | "
+                f"{p.get('Estado', '?')}"
+
+            )
+
+
+        detalle = (
+            "\n".join(
+                lineas
+            )
+            if lineas
+            else
+            "(todavía no hay pedidos)"
+        )
+
+
+        return (
+
+            "DATOS REALES DE VENTAS:\n"
+            f"Total de pedidos: {total}\n"
+            f"Pedidos de hoy: {de_hoy}\n"
+            f"Últimos pedidos:\n{detalle}"
+
+        )
+
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR VENTAS:",
+            e
+        )
+
+        return (
+            "No pude leer los datos de ventas."
+        )
+
+
+def leer_conversaciones(
+    max_registros=100,
+    ultimos_contactos=5,
+    msgs_por_contacto=14
+):
+
+    url = (
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE}/"
+        f"{TABLA}"
+    )
+
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}"
+
+    }
+
+
+    try:
+
+        r = requests.get(
+            url,
+            headers=headers,
+            params={
+                "maxRecords":
+                max_registros
+            },
+            timeout=10
+        )
+
+
+        if r.status_code != 200:
+
+            return (
+                "No pude leer las conversaciones."
+            )
+
+
+        orden = []
+
+        charlas = {}
+
+
+        for reg in r.json().get(
+            "records",
+            []
+        ):
+
+
+            campos = reg.get(
+                "fields",
+                {}
+            )
+
+
+            cid = campos.get(
+                "contact_id",
+                "?"
+            )
+
+
+            texto = campos.get(
+                "mensaje_entrante",
+                ""
+            )
+
+
+            if cid not in charlas:
+
+                charlas[cid] = []
+
+                orden.append(cid)
+
+
+            if texto.startswith(
+                "[bot] "
+            ):
+
+                charlas[cid].append(
+                    "Fer: "
+                    + texto[6:]
+                )
+
+
+            elif texto.startswith(
+                "[user] "
+            ):
+
+                charlas[cid].append(
+                    "Cliente: "
+                    + texto[7:]
+                )
+
+
+        bloques = []
+
+
+        for i, cid in enumerate(
+            orden[-ultimos_contactos:],
+            1
+        ):
+
+
+            lineas = charlas[cid][
+                -msgs_por_contacto:
+            ]
+
+
+            bloques.append(
+
+                f"--- Charla {i} ---\n"
+                + "\n".join(lineas)
+
+            )
+
+
+        return (
+
+            "\n\n".join(
+                bloques
+            )
+
+            if bloques
+
+            else
+
+            "(todavía no hay conversaciones)"
+
+        )
+
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR CONVERSACIONES:",
+            e
+        )
+
+        return (
+            "No pude leer las conversaciones."
+        )
+
+
+# ============================================================
+# FACEBOOK MESSENGER
+# ============================================================
+
+def enviar_a_messenger(
+    sender,
+    texto
+):
+
+    url = GRAPH
+
+    params = {
+
+        "access_token":
+        PAGE_TOKEN
+
+    }
+
+
+    payload = {
+
+        "recipient": {
+
+            "id":
+            sender
+
+        },
+
+        "message": {
+
+            "text":
+            texto
+
+        }
+
+    }
+
+
+    try:
+
+        r = requests.post(
+            url,
+            params=params,
+            json=payload,
+            timeout=15
+        )
+
+
+        print(
+            ">>> MESSENGER:",
+            r.status_code,
+            r.text
+        )
+
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR MESSENGER:",
+            e
+        )
+
+
+def enviar_foto(
+    sender,
+    url_foto
+):
+
+    payload = {
+
+        "recipient": {
+
+            "id":
+            sender
+
+        },
+
+        "message": {
+
+            "attachment": {
+
+                "type":
+                "image",
+
+                "payload": {
+
+                    "url":
+                    url_foto,
+
+                    "is_reusable":
+                    True
+
+                }
+
+            }
+
+        }
+
+    }
+
+
+    try:
+
+        r = requests.post(
+            GRAPH,
+            params={
+                "access_token":
+                PAGE_TOKEN
+            },
+            json=payload,
+            timeout=20
+        )
+
+
+        print(
+            ">>> FOTO:",
+            r.status_code,
+            r.text
+        )
+
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR FOTO:",
+            e
+        )
+
+
+def marcar_leido(
+    sender
+):
+
+    payload = {
+
+        "recipient": {
+
+            "id":
+            sender
+
+        },
+
+        "sender_action":
+        "mark_seen"
+
+    }
+
+
+    try:
+
+        requests.post(
+            GRAPH,
+            params={
+                "access_token":
+                PAGE_TOKEN
+            },
+            json=payload,
+            timeout=10
+        )
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR MARCAR LEIDO:",
+            e
+        )
+
+
+def mostrar_escribiendo(
+    sender
+):
+
+    payload = {
+
+        "recipient": {
+
+            "id":
+            sender
+
+        },
+
+        "sender_action":
+        "typing_on"
+
+    }
+
+
+    try:
+
+        requests.post(
+            GRAPH,
+            params={
+                "access_token":
+                PAGE_TOKEN
+            },
+            json=payload,
+            timeout=10
+        )
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR TYPING:",
+            e
+        )
 
 
 # ============================================================
@@ -2254,49 +2323,56 @@ def avisar_telegram(
     mensaje
 ):
 
-    url = (
-
-        f"https://api.telegram.org/bot"
-
-        f"{TELEGRAM_TOKEN}/sendMessage"
-
-    )
-
-    payload = {
-
-        "chat_id":
-        TELEGRAM_CHAT,
-
-        "text":
-        mensaje
-
-    }
-
-    r = requests.post(
-
-        url,
-
-        json=payload,
-
-        timeout=15
-
-    )
-
-    if r.status_code != 200:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
 
         print(
+            ">>> TELEGRAM NO CONFIGURADO"
+        )
 
-            ">>> ERROR TELEGRAM:",
+        return
 
+
+    url = (
+        "https://api.telegram.org/bot"
+        + TELEGRAM_TOKEN
+        + "/sendMessage"
+    )
+
+
+    try:
+
+        r = requests.post(
+            url,
+            json={
+
+                "chat_id":
+                TELEGRAM_CHAT,
+
+                "text":
+                mensaje
+
+            },
+            timeout=10
+        )
+
+
+        print(
+            ">>> TELEGRAM:",
             r.status_code,
-
             r.text
+        )
 
+
+    except Exception as e:
+
+        print(
+            ">>> ERROR TELEGRAM:",
+            e
         )
 
 
 # ============================================================
-# WHATSAPP / CALLMEBOT
+# WHATSAPP OPCIONAL
 # ============================================================
 
 def enviar_whatsapp(
@@ -2311,13 +2387,12 @@ def enviar_whatsapp(
 
         return
 
+
     url = (
-
         "https://api.callmebot.com/"
-
         "whatsapp.php"
-
     )
+
 
     params = {
 
@@ -2332,385 +2407,19 @@ def enviar_whatsapp(
 
     }
 
-    r = requests.get(
 
-        url,
+    try:
 
-        params=params,
+        requests.get(
+            url,
+            params=params,
+            timeout=15
+        )
 
-        timeout=20
 
-    )
-
-    if r.status_code != 200:
+    except Exception as e:
 
         print(
-
             ">>> ERROR WHATSAPP:",
-
-            r.status_code,
-
-            r.text
-
+            e
         )
-
-
-# ============================================================
-# REPORTES DEL DUEÑO
-# ============================================================
-
-def resumen_ventas():
-
-    url = (
-
-        f"https://api.airtable.com/v0/"
-
-        f"{AIRTABLE_BASE}/"
-
-        f"{TABLA_PEDIDOS}"
-
-    )
-
-    headers = {
-
-        "Authorization":
-        f"Bearer {AIRTABLE_KEY}"
-
-    }
-
-    r = requests.get(
-
-        url,
-
-        headers=headers,
-
-        params={
-            "maxRecords": 100
-        },
-
-        timeout=15
-
-    )
-
-    if r.status_code != 200:
-
-        return (
-
-            "DATOS DE VENTAS: "
-
-            "no pude leer Pedidos"
-
-        )
-
-    pedidos = [
-
-        registro.get(
-
-            "fields",
-
-            {}
-
-        )
-
-        for registro
-
-        in r.json().get(
-
-            "records",
-
-            []
-
-        )
-
-    ]
-
-    hoy = datetime.now(
-
-        timezone(
-
-            timedelta(
-
-                hours=-3
-
-            )
-
-        )
-
-    ).strftime(
-
-        "%d/%m/%Y"
-
-    )
-
-    total = len(
-
-        pedidos
-
-    )
-
-    de_hoy = sum(
-
-        1
-
-        for pedido
-
-        in pedidos
-
-        if str(
-
-            pedido.get(
-
-                "Fecha",
-
-                ""
-
-            )
-
-        ).startswith(
-
-            hoy
-
-        )
-
-    )
-
-    lineas = []
-
-    for pedido in pedidos[-15:]:
-
-        lineas.append(
-
-            f"- "
-
-            f"{pedido.get('Nombre', '?')} | "
-
-            f"{pedido.get('Ciudad', '?')} | "
-
-            f"{pedido.get('Fecha', '?')} | "
-
-            f"{pedido.get('Estado', '?')}"
-
-        )
-
-    detalle = (
-
-        "\n".join(
-
-            lineas
-
-        )
-
-        if lineas
-
-        else
-
-        "(todavía no hay pedidos)"
-
-    )
-
-    return (
-
-        "DATOS REALES DE VENTAS:\n"
-
-        f"Total de pedidos: {total}\n"
-
-        f"Pedidos de hoy: {de_hoy}\n"
-
-        f"Últimos pedidos:\n{detalle}"
-
-    )
-
-
-def leer_conversaciones(
-
-    max_registros=100,
-
-    ultimos_contactos=5,
-
-    msgs_por_contacto=14
-
-):
-
-    url = (
-
-        f"https://api.airtable.com/v0/"
-
-        f"{AIRTABLE_BASE}/"
-
-        f"{TABLA}"
-
-    )
-
-    headers = {
-
-        "Authorization":
-        f"Bearer {AIRTABLE_KEY}"
-
-    }
-
-    r = requests.get(
-
-        url,
-
-        headers=headers,
-
-        params={
-
-            "maxRecords":
-            max_registros
-
-        },
-
-        timeout=15
-
-    )
-
-    if r.status_code != 200:
-
-        return (
-
-            "(no pude leer las conversaciones)"
-
-        )
-
-    orden = []
-
-    charlas = {}
-
-    for registro in r.json().get(
-
-        "records",
-
-        []
-
-    ):
-
-        campos = registro.get(
-
-            "fields",
-
-            {}
-
-        )
-
-        cid = campos.get(
-
-            "contact_id",
-
-            "?"
-
-        )
-
-        texto = campos.get(
-
-            "mensaje_entrante",
-
-            ""
-
-        )
-
-        if cid not in charlas:
-
-            charlas[cid] = []
-
-            orden.append(cid)
-
-        if texto.startswith(
-
-            "[bot] "
-
-        ):
-
-            charlas[cid].append(
-
-                "Fer: "
-
-                + texto[6:]
-
-            )
-
-        elif texto.startswith(
-
-            "[user] "
-
-        ):
-
-            charlas[cid].append(
-
-                "Cliente: "
-
-                + texto[7:]
-
-            )
-
-        elif texto:
-
-            charlas[cid].append(
-
-                "Cliente: "
-
-                + texto
-
-            )
-
-    bloques = []
-
-    for i, cid in enumerate(
-
-        orden[-ultimos_contactos:],
-
-        1
-
-    ):
-
-        lineas = charlas[cid][
-
-            -msgs_por_contacto:
-
-        ]
-
-        bloques.append(
-
-            f"--- Charla {i} ---\n"
-
-            + "\n".join(
-
-                lineas
-
-            )
-
-        )
-
-    return (
-
-        "\n\n".join(
-
-            bloques
-
-        )
-
-        if bloques
-
-        else
-
-        "(todavía no hay conversaciones)"
-
-    )
-
-
-# ============================================================
-# RUTA PRINCIPAL
-# ============================================================
-
-@app.get("/")
-def inicio():
-
-    return {
-
-        "status":
-        "online",
-
-        "bot":
-        "Fer Bot 3.0"
-
-    }
