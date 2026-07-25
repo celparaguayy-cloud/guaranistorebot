@@ -1257,5 +1257,1460 @@ def _encontrar_producto_en_catalogo(
 
     return None, None
 
+# ============================================================
+# FACEBOOK MESSENGER
+# ============================================================
 
-# ==========================================================
+def marcar_leido(sender):
+
+    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
+
+    payload = {
+        "recipient": {
+            "id": sender
+        },
+        "sender_action": "mark_seen"
+    }
+
+    r = requests.post(
+        url,
+        json=payload,
+        timeout=15
+    )
+
+    if r.status_code != 200:
+
+        print(
+            ">>> ERROR MARCAR LEIDO:",
+            r.status_code,
+            r.text
+        )
+
+
+def mostrar_escribiendo(sender):
+
+    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
+
+    payload = {
+        "recipient": {
+            "id": sender
+        },
+        "sender_action": "typing_on"
+    }
+
+    r = requests.post(
+        url,
+        json=payload,
+        timeout=15
+    )
+
+    if r.status_code != 200:
+
+        print(
+            ">>> ERROR TYPING:",
+            r.status_code,
+            r.text
+        )
+
+
+def enviar_a_messenger(
+    sender,
+    texto
+):
+
+    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
+
+    payload = {
+
+        "recipient": {
+            "id": sender
+        },
+
+        "message": {
+            "text": texto
+        }
+
+    }
+
+    r = requests.post(
+        url,
+        json=payload,
+        timeout=20
+    )
+
+    if r.status_code != 200:
+
+        print(
+            ">>> ERROR ENVIANDO MENSAJE:",
+            r.status_code,
+            r.text
+        )
+
+    else:
+
+        print(
+            ">>> MENSAJE ENVIADO"
+        )
+
+
+def enviar_foto(
+    sender,
+    url_foto
+):
+
+    url = f"{GRAPH}?access_token={PAGE_TOKEN}"
+
+    payload = {
+
+        "recipient": {
+            "id": sender
+        },
+
+        "message": {
+
+            "attachment": {
+
+                "type": "image",
+
+                "payload": {
+
+                    "url": url_foto,
+
+                    "is_reusable": True
+
+                }
+
+            }
+
+        }
+
+    }
+
+    r = requests.post(
+        url,
+        json=payload,
+        timeout=30
+    )
+
+    if r.status_code != 200:
+
+        print(
+            ">>> ERROR ENVIANDO FOTO:",
+            r.status_code,
+            r.text
+        )
+
+    else:
+
+        print(
+            ">>> FOTO ENVIADA:",
+            url_foto
+        )
+
+
+# ============================================================
+# FOTOS DINÁMICAS DEL PRODUCTO
+# ============================================================
+
+def obtener_fotos_producto(
+    datos,
+    cantidad=3,
+    desde=0
+):
+
+    posibles_campos = [
+
+        "url_foto_1",
+        "url_foto_2",
+        "url_foto_3",
+        "url_foto_4",
+        "url_foto_5",
+        "url_foto_6",
+
+        "foto_1",
+        "foto_2",
+        "foto_3",
+        "foto_4",
+        "foto_5",
+        "foto_6",
+
+        "URL Foto 1",
+        "URL Foto 2",
+        "URL Foto 3",
+        "URL Foto 4",
+        "URL Foto 5",
+        "URL Foto 6",
+
+        "Foto 1",
+        "Foto 2",
+        "Foto 3",
+        "Foto 4",
+        "Foto 5",
+        "Foto 6",
+
+    ]
+
+    fotos = []
+
+    for campo in posibles_campos:
+
+        valor = datos.get(
+            campo
+        )
+
+        if not valor:
+
+            continue
+
+        if isinstance(
+            valor,
+            list
+        ):
+
+            for item in valor:
+
+                if isinstance(
+                    item,
+                    dict
+                ):
+
+                    url = (
+                        item.get(
+                            "url"
+                        )
+                        or
+                        item.get(
+                            "thumbnails",
+                            {}
+                        )
+                        .get(
+                            "large",
+                            {}
+                        )
+                        .get(
+                            "url"
+                        )
+                    )
+
+                else:
+
+                    url = str(
+                        item
+                    )
+
+                if url and str(
+                    url
+                ).startswith(
+                    "http"
+                ):
+
+                    fotos.append(
+                        str(
+                            url
+                        ).strip()
+                    )
+
+        else:
+
+            url = str(
+                valor
+            ).strip()
+
+            if url.startswith(
+                "http"
+            ):
+
+                fotos.append(
+                    url
+                )
+
+    # Elimina duplicadas
+    fotos_limpias = []
+
+    for foto in fotos:
+
+        if foto not in fotos_limpias:
+
+            fotos_limpias.append(
+                foto
+            )
+
+    return fotos_limpias[
+        desde:
+        desde + cantidad
+    ]
+
+
+def revisar_fotos(
+    sender,
+    respuesta
+):
+
+    fotos = []
+
+    producto = (
+        ULTIMO_PRODUCTO_CONSULTADO.get(
+            sender
+        )
+    )
+
+    if "[FOTOS]" in respuesta:
+
+        if producto:
+
+            fotos.extend(
+                obtener_fotos_producto(
+                    producto,
+                    cantidad=3,
+                    desde=0
+                )
+            )
+
+        else:
+
+            print(
+                ">>> NO HAY PRODUCTO PARA FOTOS"
+            )
+
+    if "[MASFOTOS]" in respuesta:
+
+        if producto:
+
+            fotos.extend(
+                obtener_fotos_producto(
+                    producto,
+                    cantidad=3,
+                    desde=3
+                )
+            )
+
+        else:
+
+            print(
+                ">>> NO HAY PRODUCTO PARA MAS FOTOS"
+            )
+
+    respuesta = (
+        respuesta
+        .replace(
+            "[FOTOS]",
+            ""
+        )
+        .replace(
+            "[MASFOTOS]",
+            ""
+        )
+        .strip()
+    )
+
+    return respuesta, fotos
+
+
+def revisar_video(
+    respuesta
+):
+
+    video = None
+
+    if "[VIDEO]" in respuesta:
+
+        producto = None
+
+        # El video se busca desde el último producto
+        # utilizado por el cliente en responder().
+        #
+        # Esta función mantiene compatibilidad
+        # con el flujo actual.
+
+        respuesta = (
+            respuesta
+            .replace(
+                "[VIDEO]",
+                ""
+            )
+            .strip()
+        )
+
+    return respuesta, video
+
+
+# ============================================================
+# HISTORIAL DE CONVERSACIONES
+# ============================================================
+
+def leer_historial(
+    sender,
+    limite=20
+):
+
+    url = (
+        f"https://api.airtable.com/v0/"
+        f"{AIRTABLE_BASE}/"
+        f"{TABLA}"
+    )
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}"
+
+    }
+
+    params = {
+
+        "maxRecords": 100,
+
+        "filterByFormula":
+        f"{{contact_id}}='{sender}'"
+
+    }
+
+    r = requests.get(
+
+        url,
+
+        headers=headers,
+
+        params=params,
+
+        timeout=15
+
+    )
+
+    if r.status_code != 200:
+
+        print(
+
+            ">>> ERROR LEYENDO HISTORIAL:",
+
+            r.status_code,
+
+            r.text
+
+        )
+
+        return []
+
+    registros = r.json().get(
+
+        "records",
+
+        []
+
+    )
+
+    registros.reverse()
+
+    historial = []
+
+    for registro in registros[-limite:]:
+
+        fields = registro.get(
+
+            "fields",
+
+            {}
+
+        )
+
+        entrante = fields.get(
+
+            "mensaje_entrante",
+
+            ""
+
+        )
+
+        rol = fields.get(
+
+            "rol",
+
+            ""
+
+        )
+
+        if not entrante:
+
+            continue
+
+        if entrante.startswith(
+            "[user] "
+        ):
+
+            historial.append({
+
+                "role": "user",
+
+                "content":
+                entrante[7:]
+
+            })
+
+        elif entrante.startswith(
+            "[bot] "
+        ):
+
+            historial.append({
+
+                "role": "model",
+
+                "content":
+                entrante[6:]
+
+            })
+
+        elif rol == "user":
+
+            historial.append({
+
+                "role": "user",
+
+                "content":
+                entrante
+
+            })
+
+        elif rol == "model":
+
+            historial.append({
+
+                "role": "model",
+
+                "content":
+                entrante
+
+            })
+
+    return historial
+
+
+def guardar(
+    sender,
+    rol,
+    texto
+):
+
+    url = (
+
+        f"https://api.airtable.com/v0/"
+
+        f"{AIRTABLE_BASE}/"
+
+        f"{TABLA}"
+
+    )
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}",
+
+        "Content-Type":
+        "application/json"
+
+    }
+
+    prefijo = (
+
+        "[user] "
+
+        if rol == "user"
+
+        else
+
+        "[bot] "
+
+    )
+
+    cuerpo = {
+
+        "fields": {
+
+            "contact_id":
+            str(sender),
+
+            "mensaje_entrante":
+            prefijo + str(texto),
+
+            "fecha":
+            datetime.now(
+                timezone(
+                    timedelta(
+                        hours=-3
+                    )
+                )
+            ).isoformat()
+
+        }
+
+    }
+
+    r = requests.post(
+
+        url,
+
+        headers=headers,
+
+        json=cuerpo,
+
+        timeout=15
+
+    )
+
+    if r.status_code not in (
+
+        200,
+
+        201
+
+    ):
+
+        print(
+
+            ">>> ERROR GUARDANDO CHAT:",
+
+            r.status_code,
+
+            r.text
+
+        )
+
+
+# ============================================================
+# PEDIDOS
+# ============================================================
+
+def revisar_pedido(
+    sender,
+    respuesta
+):
+
+    patron = (
+
+        r"\[PEDIDO\](.*?)"
+        r"\[/PEDIDO\]"
+
+    )
+
+    m = re.search(
+
+        patron,
+
+        respuesta,
+
+        re.DOTALL
+
+    )
+
+    if m:
+
+        resumen = m.group(
+
+            1
+
+        ).strip()
+
+        avisar_telegram(
+
+            formatear_pedido(
+                resumen
+            )
+
+        )
+
+        enviar_whatsapp(
+
+            formatear_pedido_whatsapp(
+                resumen
+            )
+
+        )
+
+        guardar_pedido(
+
+            resumen
+        )
+
+        respuesta = re.sub(
+
+            patron,
+
+            "",
+
+            respuesta,
+
+            flags=re.DOTALL
+
+        ).strip()
+
+    return respuesta
+
+
+def _parsear(
+    resumen
+):
+
+    datos = {}
+
+    for parte in resumen.split(
+        "|"
+    ):
+
+        if ":" in parte:
+
+            clave, valor = (
+                parte.split(
+                    ":",
+                    1
+                )
+            )
+
+            datos[
+                clave.strip().lower()
+            ] = valor.strip()
+
+    return datos
+
+
+def formatear_pedido(
+    resumen
+):
+
+    d = _parsear(
+        resumen
+    )
+
+    hora = datetime.now(
+
+        timezone(
+
+            timedelta(
+
+                hours=-3
+
+            )
+
+        )
+
+    ).strftime(
+
+        "%d/%m/%Y %H:%M"
+
+    )
+
+    producto = (
+
+        d.get(
+
+            "producto",
+
+            "Producto del catálogo"
+
+        )
+
+    )
+
+    return (
+
+        "🛍️ NUEVO PEDIDO\n"
+
+        "━━━━━━━━━━━━━━━\n"
+
+        f"👤 Nombre: {d.get('nombre', '-')}\n"
+
+        f"📍 Ciudad: {d.get('ciudad', '-')}\n"
+
+        f"📞 Teléfono: {d.get('tel', '-')}\n"
+
+        f"🏠 Dirección: {d.get('direccion', '-')}\n"
+
+        f"🛒 Producto: {producto}\n"
+
+        "━━━━━━━━━━━━━━━\n"
+
+        f"🕒 {hora} hs"
+
+    )
+
+
+def formatear_pedido_whatsapp(
+    resumen
+):
+
+    d = _parsear(
+        resumen
+    )
+
+    return (
+
+        "🛍️ NUEVO PEDIDO\n\n"
+
+        f"Nombre: {d.get('nombre', '-')}\n"
+
+        f"Ciudad: {d.get('ciudad', '-')}\n"
+
+        f"Teléfono: {d.get('tel', '-')}\n"
+
+        f"Dirección: {d.get('direccion', '-')}"
+
+    )
+
+
+def guardar_pedido(
+    resumen
+):
+
+    d = _parsear(
+        resumen
+    )
+
+    hora = datetime.now(
+
+        timezone(
+
+            timedelta(
+
+                hours=-3
+
+            )
+
+        )
+
+    ).strftime(
+
+        "%d/%m/%Y %H:%M"
+
+    )
+
+    url = (
+
+        f"https://api.airtable.com/v0/"
+
+        f"{AIRTABLE_BASE}/"
+
+        f"{TABLA_PEDIDOS}"
+
+    )
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}",
+
+        "Content-Type":
+        "application/json"
+
+    }
+
+    cuerpo = {
+
+        "fields": {
+
+            "Nombre":
+            d.get(
+                "nombre",
+                ""
+            ),
+
+            "Ciudad":
+            d.get(
+                "ciudad",
+                ""
+            ),
+
+            "Telefono":
+            d.get(
+                "tel",
+                ""
+            ),
+
+            "Direccion":
+            d.get(
+                "direccion",
+                ""
+            ),
+
+            "Producto":
+            d.get(
+                "producto",
+                "Producto del catálogo"
+            ),
+
+            "Fecha":
+            hora,
+
+            "Estado":
+            "Nuevo"
+
+        }
+
+    }
+
+    r = requests.post(
+
+        url,
+
+        headers=headers,
+
+        json=cuerpo,
+
+        timeout=15
+
+    )
+
+    if r.status_code not in (
+
+        200,
+
+        201
+
+    ):
+
+        print(
+
+            ">>> ERROR GUARDANDO PEDIDO:",
+
+            r.status_code,
+
+            r.text
+
+        )
+
+    else:
+
+        print(
+
+            ">>> PEDIDO GUARDADO"
+
+        )
+
+
+# ============================================================
+# INTERÉS EN PRODUCTO NO ENCONTRADO
+# ============================================================
+
+def revisar_interes(
+    sender,
+    respuesta
+):
+
+    patron = (
+
+        r"\[INTERES\](.*?)"
+        r"\[/INTERES\]"
+
+    )
+
+    m = re.search(
+
+        patron,
+
+        respuesta,
+
+        re.DOTALL
+
+    )
+
+    if m:
+
+        interes = m.group(
+
+            1
+
+        ).strip()
+
+        avisar_telegram(
+
+            "👀 INTERÉS EN PRODUCTO\n"
+
+            + interes
+
+            + "\nCliente: "
+
+            + str(sender)
+
+        )
+
+        respuesta = re.sub(
+
+            patron,
+
+            "",
+
+            respuesta,
+
+            flags=re.DOTALL
+
+        ).strip()
+
+    return respuesta
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def avisar_telegram(
+    mensaje
+):
+
+    url = (
+
+        f"https://api.telegram.org/bot"
+
+        f"{TELEGRAM_TOKEN}/sendMessage"
+
+    )
+
+    payload = {
+
+        "chat_id":
+        TELEGRAM_CHAT,
+
+        "text":
+        mensaje
+
+    }
+
+    r = requests.post(
+
+        url,
+
+        json=payload,
+
+        timeout=15
+
+    )
+
+    if r.status_code != 200:
+
+        print(
+
+            ">>> ERROR TELEGRAM:",
+
+            r.status_code,
+
+            r.text
+
+        )
+
+
+# ============================================================
+# WHATSAPP / CALLMEBOT
+# ============================================================
+
+def enviar_whatsapp(
+    mensaje
+):
+
+    if not WHATSAPP_DESTINO:
+
+        return
+
+    if not CALLMEBOT_APIKEY:
+
+        return
+
+    url = (
+
+        "https://api.callmebot.com/"
+
+        "whatsapp.php"
+
+    )
+
+    params = {
+
+        "phone":
+        WHATSAPP_DESTINO,
+
+        "text":
+        mensaje,
+
+        "apikey":
+        CALLMEBOT_APIKEY
+
+    }
+
+    r = requests.get(
+
+        url,
+
+        params=params,
+
+        timeout=20
+
+    )
+
+    if r.status_code != 200:
+
+        print(
+
+            ">>> ERROR WHATSAPP:",
+
+            r.status_code,
+
+            r.text
+
+        )
+
+
+# ============================================================
+# REPORTES DEL DUEÑO
+# ============================================================
+
+def resumen_ventas():
+
+    url = (
+
+        f"https://api.airtable.com/v0/"
+
+        f"{AIRTABLE_BASE}/"
+
+        f"{TABLA_PEDIDOS}"
+
+    )
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}"
+
+    }
+
+    r = requests.get(
+
+        url,
+
+        headers=headers,
+
+        params={
+            "maxRecords": 100
+        },
+
+        timeout=15
+
+    )
+
+    if r.status_code != 200:
+
+        return (
+
+            "DATOS DE VENTAS: "
+
+            "no pude leer Pedidos"
+
+        )
+
+    pedidos = [
+
+        registro.get(
+
+            "fields",
+
+            {}
+
+        )
+
+        for registro
+
+        in r.json().get(
+
+            "records",
+
+            []
+
+        )
+
+    ]
+
+    hoy = datetime.now(
+
+        timezone(
+
+            timedelta(
+
+                hours=-3
+
+            )
+
+        )
+
+    ).strftime(
+
+        "%d/%m/%Y"
+
+    )
+
+    total = len(
+
+        pedidos
+
+    )
+
+    de_hoy = sum(
+
+        1
+
+        for pedido
+
+        in pedidos
+
+        if str(
+
+            pedido.get(
+
+                "Fecha",
+
+                ""
+
+            )
+
+        ).startswith(
+
+            hoy
+
+        )
+
+    )
+
+    lineas = []
+
+    for pedido in pedidos[-15:]:
+
+        lineas.append(
+
+            f"- "
+
+            f"{pedido.get('Nombre', '?')} | "
+
+            f"{pedido.get('Ciudad', '?')} | "
+
+            f"{pedido.get('Fecha', '?')} | "
+
+            f"{pedido.get('Estado', '?')}"
+
+        )
+
+    detalle = (
+
+        "\n".join(
+
+            lineas
+
+        )
+
+        if lineas
+
+        else
+
+        "(todavía no hay pedidos)"
+
+    )
+
+    return (
+
+        "DATOS REALES DE VENTAS:\n"
+
+        f"Total de pedidos: {total}\n"
+
+        f"Pedidos de hoy: {de_hoy}\n"
+
+        f"Últimos pedidos:\n{detalle}"
+
+    )
+
+
+def leer_conversaciones(
+
+    max_registros=100,
+
+    ultimos_contactos=5,
+
+    msgs_por_contacto=14
+
+):
+
+    url = (
+
+        f"https://api.airtable.com/v0/"
+
+        f"{AIRTABLE_BASE}/"
+
+        f"{TABLA}"
+
+    )
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}"
+
+    }
+
+    r = requests.get(
+
+        url,
+
+        headers=headers,
+
+        params={
+
+            "maxRecords":
+            max_registros
+
+        },
+
+        timeout=15
+
+    )
+
+    if r.status_code != 200:
+
+        return (
+
+            "(no pude leer las conversaciones)"
+
+        )
+
+    orden = []
+
+    charlas = {}
+
+    for registro in r.json().get(
+
+        "records",
+
+        []
+
+    ):
+
+        campos = registro.get(
+
+            "fields",
+
+            {}
+
+        )
+
+        cid = campos.get(
+
+            "contact_id",
+
+            "?"
+
+        )
+
+        texto = campos.get(
+
+            "mensaje_entrante",
+
+            ""
+
+        )
+
+        if cid not in charlas:
+
+            charlas[cid] = []
+
+            orden.append(cid)
+
+        if texto.startswith(
+
+            "[bot] "
+
+        ):
+
+            charlas[cid].append(
+
+                "Fer: "
+
+                + texto[6:]
+
+            )
+
+        elif texto.startswith(
+
+            "[user] "
+
+        ):
+
+            charlas[cid].append(
+
+                "Cliente: "
+
+                + texto[7:]
+
+            )
+
+        elif texto:
+
+            charlas[cid].append(
+
+                "Cliente: "
+
+                + texto
+
+            )
+
+    bloques = []
+
+    for i, cid in enumerate(
+
+        orden[-ultimos_contactos:],
+
+        1
+
+    ):
+
+        lineas = charlas[cid][
+
+            -msgs_por_contacto:
+
+        ]
+
+        bloques.append(
+
+            f"--- Charla {i} ---\n"
+
+            + "\n".join(
+
+                lineas
+
+            )
+
+        )
+
+    return (
+
+        "\n\n".join(
+
+            bloques
+
+        )
+
+        if bloques
+
+        else
+
+        "(todavía no hay conversaciones)"
+
+    )
+
+
+# ============================================================
+# RUTA PRINCIPAL
+# ============================================================
+
+@app.get("/")
+def inicio():
+
+    return {
+
+        "status":
+        "online",
+
+        "bot":
+        "Fer Bot 3.0"
+
+    }
