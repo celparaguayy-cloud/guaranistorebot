@@ -1,8 +1,9 @@
 """
 FER BOT 3.0 — catálogo dinámico desde Airtable
-IA (Gemini) + memoria (Airtable) + fotos + video + aviso de pedidos a Telegram
-+ registro de pedidos en tabla + "escribiendo..." + anti-duplicados
-+ MODO DUENO (palabra secreta): asistente con reportes de ventas y auditor de charlas.
+IA (Gemini) + memoria (Airtable) + fotos + video
++ aviso de pedidos a Telegram
++ registro de pedidos en tabla
++ modo dueño
 """
 
 import os
@@ -18,7 +19,9 @@ from fastapi import FastAPI, Request, Response
 app = FastAPI()
 
 
-# ================= CONFIGURACION =================
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
 
 VERIFY_TOKEN = os.environ.get(
     "VERIFY_TOKEN",
@@ -52,47 +55,26 @@ TABLA = "Conversaciones"
 TABLA_PEDIDOS = "Pedidos"
 TABLA_CATALOGO = "Catalogo_Espejo"
 
+
 GRAPH = (
     "https://graph.facebook.com/"
     "v21.0/me/messages"
 )
 
 
-# ================= FOTOS Y VIDEO =================
-
-BASE_FOTOS = (
-    "https://raw.githubusercontent.com/"
-    "celparaguayy-cloud/guaranistorebot/main/"
-)
-
-# Se mantienen por compatibilidad,
-# pero el catalogo dinamico ya no depende de estas.
-FOTOS_PRINCIPALES = [
-    "ipl1.jpg",
-    "ipl2.jpg",
-    "ipl3.jpg"
-]
-
-FOTOS_EXTRA = [
-    "ipl4.jpg",
-    "ipl5.jpg",
-    "ipl6.jpg"
-]
-
-VIDEO_URL = (
-    "https://youtube.com/shorts/0WoRz-Nzucw"
-)
-
-
-# ================= MEMORIA TEMPORAL =================
+# ============================================================
+# VARIABLES GLOBALES
+# ============================================================
 
 MENSAJES_VISTOS = set()
 
 MODO_DUENO = {}
 
-# Guarda el ultimo producto consultado
-# por cada cliente.
+# Último producto real consultado por cada cliente.
 ULTIMO_PRODUCTO_CONSULTADO = {}
+
+# Producto que el cliente está comprando.
+PRODUCTO_ELEGIDO_POR_CLIENTE = {}
 
 
 PALABRAS_SALIR = [
@@ -106,275 +88,198 @@ PALABRAS_SALIR = [
     "volver al modo",
     "regresa",
     "volver a atender",
-    "dejar de probar"
+    "dejar de probar",
 ]
 
 
-# ================= SYSTEM PROMPT =================
+# ============================================================
+# PROMPT DEL VENDEDOR
+# ============================================================
 
 SYSTEM_PROMPT = """
 
-Sos Fer, vendedor de verdad de Guaranistore, una tienda paraguaya.
+Sos Fer, vendedor de verdad de Guaranistore,
+una tienda paraguaya.
 
-Sos una PERSONA, no un bot: con caracter, historia y corazon.
-Nadie deberia sospechar que del otro lado hay un sistema.
+Sos una PERSONA, no un bot.
 
-Antes que vendedor, sos gente.
-
-Tu norte: acompanar a la persona hasta que se lleve su producto,
-tratandola tan bien que quiera comprarte a VOS.
+Sos natural, cálido, paraguayo y vendedor,
+pero nunca presionás ni inventás datos.
 
 SALUDO:
 
-Saluda UNA SOLA VEZ, al principio.
+Saludá UNA SOLA VEZ al principio.
 
-Si ya venis conversando, NO vuelvas a saludar ni a presentarte.
-Continua la charla.
-
-NO uses "mba'eichapa" ni saludo guarani en cada mensaje.
-
-Varia los saludos.
-
-QUIEN SOS:
-
-30 y pico, paraguayo, hace anos que vendes.
-
-Respetas la plata del que te escribe.
-
-Calido, con picardia justa, serio con lo importante.
-
-Nunca prometes lo que no podes cumplir.
-
-Lees a la persona y actuas en consecuencia.
-
-TU AMABILIDAD:
-
-Usa "por favor" y "gracias" de verdad.
-
-Trata con carino.
-
-Haz sentir importante a la persona.
-
-Despedite con calidez aunque no compre.
-
-Amable no es zalamero.
-
-Nada de "mi amor" o "mi reina".
+Si ya venís conversando, NO vuelvas a saludar
+ni a presentarte.
 
 COMO ESCRIBIS:
 
-Mensajes CORTOS, de 1 a 3 lineas.
+- Mensajes cortos.
+- De 1 a 3 líneas normalmente.
+- Voseo paraguayo.
+- Una pregunta por vez.
+- Pocos emojis.
+- Soná natural.
+- No escribas como robot.
 
-Voseo paraguayo.
+FOTOS:
 
-Guarani muy de vez en cuando.
-
-UNA pregunta por vez.
-
-Espeja el tono del cliente.
-
-EMOJIS:
-
-Pocos pero expresivos.
-
-Nunca una fila de emojis.
-
-FOTOS DEL PRODUCTO:
-
-Cuando el cliente quiera ver el producto:
-
-"tenes foto?"
-"mostrame"
-"como es?"
-
-agrega:
+Cuando el cliente quiera ver fotos del producto,
+agregá exactamente:
 
 [FOTOS]
 
-El codigo enviara 3 fotos reales y borrara la etiqueta.
-
-Si pide ver MAS:
+Si pide más fotos después,
+agregá exactamente:
 
 [MASFOTOS]
 
-El codigo enviara 3 fotos mas.
+El sistema va a enviar las fotos reales
+del producto consultado.
 
-No repitas [FOTOS] si ya las mandaste,
-salvo que el cliente pida fotos nuevamente.
+VIDEO:
 
-VIDEO DEL PRODUCTO:
-
-Si pide un video:
-
-"tenes video?"
-"en video"
-"mostrame funcionando"
-
-agrega:
+Si pide video,
+agregá:
 
 [VIDEO]
 
-El codigo enviara el video correspondiente.
-
-MENSAJES CORTOS:
-
-"precio" o "cuanto?"
-responde precio al toque y una pregunta.
-
-"hola":
-saluda y pregunta en que ayudas.
+El sistema va a enviar el video real
+del producto si existe.
 
 PRODUCTOS:
 
-La informacion de cada producto debe salir
-del catalogo de Airtable.
+Airtable es la fuente principal de verdad.
 
-Fer puede vender y responder sobre CUALQUIER
-producto que exista en Catalogo_Espejo.
+Podés vender CUALQUIER producto que exista
+en la tabla Catalogo_Espejo.
 
-Nunca digas que solo vendes la depiladora.
+Nunca digas que solo vendés la depiladora IPL.
 
-Si el cliente menciona un producto del catalogo
-o pregunta por precio, disponibilidad,
-caracteristicas, fotos, video o cualquier dato:
+Si el cliente menciona un producto,
+pregunta por su precio,
+stock,
+disponibilidad,
+características,
+fotos,
+video
+o cualquier dato,
 
-Usa UNICAMENTE esta etiqueta:
-
-[CONSULTAR_PRODUCTO: nombre del producto]
-
-No agregues texto en esa respuesta.
-
-El sistema consulta Airtable.
-
-Despues el sistema te devuelve los datos reales
-del producto para generar la respuesta final.
-
-Nunca inventes precio, stock,
-caracteristicas ni disponibilidad.
-
-Si el producto NO existe en Airtable:
-
-[INTERES] lo que pidio el cliente [/INTERES]
-
-DISPONIBILIDAD:
-
-Si preguntan:
-
-"hay stock?"
-"tenes disponible?"
-"todavia queda?"
-
-usa:
+usá exactamente:
 
 [CONSULTAR_PRODUCTO: nombre del producto]
 
-OBJECIONES:
+No inventes datos.
 
-"Funciona?"
-responde usando los datos reales del producto.
+Si el producto no existe,
+usá:
 
-"Es caro":
-un solo pago, contra entrega,
-y si no es el momento cuando puedas.
+[INTERES] lo que pidió el cliente [/INTERES]
 
-"Y si no sirve?":
-responde segun la garantia real del producto.
+PRECIO:
 
-"Lo pienso":
-dale, sin insistir.
+Si pregunta el precio,
+respondé el precio real del catálogo.
 
-REGLAS:
+STOCK:
 
-Nunca inventes precios ni datos.
+Si pregunta si hay stock,
+respondé según el catálogo.
 
-Nunca uses el dolor de alguien para vender.
+PEDIDOS:
+
+Necesitás:
+
+1. Nombre y apellido
+2. Ciudad
+3. Teléfono
+4. Dirección
+
+Cuando tengas los 4 datos y el cliente CONFIRME,
+agregá exactamente:
+
+[PEDIDO] Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]
+
+Solo cuando el pedido esté cerrado.
+
+HONESTIDAD:
+
+No inventes testimonios.
+
+No inventes stock.
+
+No inventes precios.
+
+No inventes promociones.
+
+No inventes características.
 
 No presiones.
 
-Amable sin zalameria.
-
-No hables de otros productos salvo que pregunten.
-
-Nunca digas que sos un bot: sos Fer.
+Tratá bien a la persona.
 
 """
 
 
-# ================= PROMPT DUENO =================
+# ============================================================
+# PROMPT DEL DUEÑO
+# ============================================================
 
 PROMPT_DUENO = """
 
-Estas hablando con Fernando,
-tu creador y dueno de Guaranistore,
+Estás hablando con Fernando,
+creador y dueño de Guaranistore,
 en MODO PRIVADO.
 
-NO actues como vendedor.
+No actúes como vendedor.
 
-Sos su ASISTENTE de confianza y mano derecha
-del negocio.
+Sos su asistente de confianza.
 
 Hablale con naturalidad,
 honestidad y de igual a igual.
 
-Junto a su mensaje vas a recibir:
+Vas a recibir datos reales de ventas
+y conversaciones recientes.
 
-DATOS REALES DE VENTAS
-y
-CONVERSACIONES RECIENTES.
+Podés:
 
-Con los datos de VENTAS:
+- mostrar reportes;
+- resumir ventas;
+- mostrar conversaciones;
+- auditar charlas;
+- señalar errores;
+- ayudar a probar el bot.
 
-Cuando pregunte, dale reportes concretos.
+No inventes números.
 
-Numeros reales.
+No uses [PEDIDO] en este modo.
 
-No inventes.
-
-Con las CONVERSACIONES:
-
-Podes mostrar una charla.
-
-Resumirla.
-
-Analizarla.
-
-Actuar como AUDITOR.
-
-Decile honestamente que se podria mejorar.
-
-Se concreto y honesto.
-
-Tambien lo ayudas a probar el bot.
-
-Podes usar:
+Podés usar:
 
 [FOTOS]
+
 [MASFOTOS]
+
 [VIDEO]
 
-NUNCA uses:
-
-[PEDIDO]
-
-en este modo.
+si Fernando quiere probar material.
 
 """
 
 
-# =================================================
-# ================= WEBHOOK =======================
-# =================================================
-
+# ============================================================
+# WEBHOOK
+# ============================================================
 
 @app.get("/webhook")
 def verificar(request: Request):
 
     params = request.query_params
 
-    if (
-        params.get("hub.verify_token")
-        == VERIFY_TOKEN
-    ):
+    if params.get(
+        "hub.verify_token"
+    ) == VERIFY_TOKEN:
 
         return Response(
             content=params.get(
@@ -422,19 +327,17 @@ async def recibir(request: Request):
             mensaje = evento.get(
                 "message",
                 {}
+
             )
 
             mid = mensaje.get(
                 "mid"
             )
 
-            if (
-                mid
-                and mid in MENSAJES_VISTOS
-            ):
+            if mid and mid in MENSAJES_VISTOS:
 
                 print(
-                    ">>> Repetido, lo ignoro"
+                    ">>> MENSAJE REPETIDO"
                 )
 
                 continue
@@ -451,40 +354,38 @@ async def recibir(request: Request):
 
                     MENSAJES_VISTOS.clear()
 
-            if "text" in mensaje:
-
-                texto = mensaje[
-                    "text"
-                ]
+            if "text" not in mensaje:
 
                 print(
-                    f">>> TEXTO: "
-                    f"'{texto}' "
-                    f"de {sender}"
+                    ">>> EVENTO SIN TEXTO"
                 )
 
-                try:
+                continue
 
-                    responder(
-                        sender,
-                        texto
-                    )
+            texto = mensaje[
+                "text"
+            ]
 
-                except Exception:
+            print(
+                f">>> TEXTO: '{texto}' "
+                f"DE {sender}"
+            )
 
-                    print(
-                        ">>> ERROR EN RESPONDER:"
-                    )
+            try:
 
-                    print(
-                        traceback.format_exc()
-                    )
+                responder(
+                    sender,
+                    texto
+                )
 
-            else:
+            except Exception:
 
                 print(
-                    ">>> Evento sin texto "
-                    "(lo ignoro)"
+                    ">>> ERROR EN RESPONDER:"
+                )
+
+                print(
+                    traceback.format_exc()
                 )
 
     return {
@@ -492,10 +393,9 @@ async def recibir(request: Request):
     }
 
 
-# =================================================
-# ================= LOGICA PRINCIPAL ==============
-# =================================================
-
+# ============================================================
+# RESPONDER
+# ============================================================
 
 def responder(
     sender,
@@ -518,39 +418,37 @@ def responder(
     )
 
     tiene_clave = (
-        bool(CLAVE_DUENO)
-        and CLAVE_DUENO in t_lower
+        bool(
+            CLAVE_DUENO
+        )
+        and
+        CLAVE_DUENO in t_lower
     )
 
 
-    # ================= MODO DUENO =================
+    # ENTRAR AL MODO DUEÑO
 
-    if (
-        not en_modo
-        and tiene_clave
-    ):
+    if not en_modo and tiene_clave:
 
         MODO_DUENO[
             sender
         ] = True
 
-        en_modo = True
-
         enviar_a_messenger(
             sender,
-            "Listo dueno, entre en MODO PRUEBA. "
+            "Listo dueño, entré en MODO PRUEBA. "
             "Te hablo como tu asistente, no como vendedor. "
-            "Cuando quieras que vuelva a atender clientes, "
-            "decime: modo vendedor."
+            "Cuando quieras volver a atender clientes, decime: modo vendedor."
         )
 
+        return
 
-    elif (
-        en_modo
-        and any(
-            p in t_lower
-            for p in PALABRAS_SALIR
-        )
+
+    # SALIR DEL MODO DUEÑO
+
+    if en_modo and any(
+        palabra in t_lower
+        for palabra in PALABRAS_SALIR
     ):
 
         MODO_DUENO[
@@ -559,14 +457,16 @@ def responder(
 
         enviar_a_messenger(
             sender,
-            "Listo, volvi al MODO VENDEDOR. "
+            "Listo, volví al MODO VENDEDOR. "
             "Ya atiendo normal a los clientes 👍"
         )
 
         return
 
 
-    # ================= MODO DUENO =================
+    # ========================================================
+    # MODO DUEÑO
+    # ========================================================
 
     if en_modo:
 
@@ -593,10 +493,10 @@ def responder(
 
         contexto = (
             resumen_ventas()
-            + "\n\n"
-            + "=== CONVERSACIONES RECIENTES ==="
-            + "\n"
-            + leer_conversaciones()
+            +
+            "\n\n=== CONVERSACIONES RECIENTES ===\n"
+            +
+            leer_conversaciones()
         )
 
 
@@ -604,14 +504,18 @@ def responder(
             [],
             (
                 contexto
-                + "\n\nMensaje del dueno: "
-                + texto_ia
+                +
+                "\n\nMensaje del dueño: "
+                +
+                texto_ia
             ),
             PROMPT_DUENO
         )
 
 
-    # ================= MODO VENDEDOR =================
+    # ========================================================
+    # MODO VENDEDOR
+    # ========================================================
 
     else:
 
@@ -619,12 +523,6 @@ def responder(
             sender
         )
 
-
-        # Primera consulta a Gemini.
-        # Puede responder normalmente o pedir:
-        #
-        # [CONSULTAR_PRODUCTO: nombre]
-        #
 
         respuesta = preguntar_a_gemini(
             historial,
@@ -651,17 +549,15 @@ def responder(
 
             if datos_producto:
 
-                # Guardamos el producto real
-                # consultado por este cliente.
-
                 ULTIMO_PRODUCTO_CONSULTADO[
                     sender
                 ] = datos_producto
 
 
-                # Ahora Gemini responde usando
-                # unicamente los datos reales
-                # de Airtable.
+                PRODUCTO_ELEGIDO_POR_CLIENTE[
+                    sender
+                ] = datos_producto
+
 
                 respuesta = (
                     generar_respuesta_con_producto(
@@ -674,14 +570,11 @@ def responder(
 
             else:
 
-                # Si no existe, borramos cualquier
-                # producto anterior para evitar
-                # enviar fotos equivocadas.
-
                 ULTIMO_PRODUCTO_CONSULTADO.pop(
                     sender,
                     None
                 )
+
 
                 respuesta = revisar_interes(
                     sender,
@@ -690,13 +583,11 @@ def responder(
 
 
     print(
-        ">>> GEMINI "
-        f"({'dueno' if en_modo else 'vendedor'}): "
-        f"'{respuesta}'"
+        f">>> GEMINI: {respuesta}"
     )
 
 
-    # ================= PEDIDOS =================
+    # PEDIDO
 
     if not en_modo:
 
@@ -712,7 +603,7 @@ def responder(
         )
 
 
-    # ================= MATERIAL =================
+    # FOTOS
 
     respuesta, fotos = revisar_fotos(
         sender,
@@ -720,12 +611,15 @@ def responder(
     )
 
 
+    # VIDEO
+
     respuesta, video = revisar_video(
+        sender,
         respuesta
     )
 
 
-    # ================= ENVIAR =================
+    # ENVÍA TEXTO
 
     if respuesta:
 
@@ -735,13 +629,17 @@ def responder(
         )
 
 
-    for url in fotos:
+    # ENVÍA FOTOS
+
+    for foto in fotos:
 
         enviar_foto(
             sender,
-            url
+            foto
         )
 
+
+    # ENVÍA VIDEO
 
     if video:
 
@@ -751,7 +649,7 @@ def responder(
         )
 
 
-    # ================= GUARDAR =================
+    # GUARDA CONVERSACIÓN
 
     if not en_modo:
 
@@ -765,29 +663,171 @@ def responder(
         guardar(
             sender,
             "model",
-            (
-                respuesta
-                if respuesta
-                else
-                "(envie material del producto)"
-            )
+            respuesta
+            if respuesta
+            else
+            "(envió material del producto)"
         )
 
 
-# =================================================
-# ================= PRODUCTOS =====================
-# =================================================
+# ============================================================
+# GEMINI
+# ============================================================
 
+def preguntar_a_gemini(
+    historial,
+    texto,
+    system_prompt
+):
+
+    partes = []
+
+
+    partes.append(
+        {
+            "text": system_prompt
+        }
+    )
+
+
+    for item in historial[-20:]:
+
+        rol = item.get(
+            "role",
+            "user"
+        )
+
+        contenido = item.get(
+            "content",
+            ""
+        )
+
+
+        if rol == "user":
+
+            prefijo = "Cliente: "
+
+        else:
+
+            prefijo = "Fer: "
+
+
+        partes.append(
+            {
+                "text":
+                prefijo
+                +
+                str(
+                    contenido
+                )
+            }
+        )
+
+
+    partes.append(
+        {
+            "text":
+            "Mensaje actual:\n"
+            +
+            texto
+        }
+    )
+
+
+    url = (
+        "https://generativelanguage.googleapis.com/"
+        "v1beta/models/gemini-2.0-flash:generateContent"
+        f"?key={GEMINI_KEY}"
+    )
+
+
+    payload = {
+
+        "contents": [
+
+            {
+                "parts": partes
+            }
+
+        ],
+
+        "generationConfig": {
+
+            "temperature": 0.7,
+
+            "maxOutputTokens": 500
+
+        }
+
+    }
+
+
+    r = requests.post(
+        url,
+        json=payload,
+        timeout=45
+    )
+
+
+    if r.status_code != 200:
+
+        print(
+            ">>> GEMINI ERROR:",
+            r.status_code,
+            r.text
+        )
+
+
+        return (
+            "Perdón, tuve un pequeño problema "
+            "para responderte. "
+            "¿Me escribís de nuevo, por favor?"
+        )
+
+
+    data = r.json()
+
+
+    try:
+
+        return (
+            data[
+                "candidates"
+            ][
+                0
+            ][
+                "content"
+            ][
+                "parts"
+            ][
+                0
+            ][
+                "text"
+            ].strip()
+        )
+
+
+    except Exception:
+
+        print(
+            ">>> RESPUESTA GEMINI INESPERADA:",
+            data
+        )
+
+
+        return (
+            "Perdón, no pude procesar eso ahora. "
+            "¿Me escribís de nuevo, por favor?"
+        )
+
+
+# ============================================================
+# CONSULTA DE PRODUCTOS
+# ============================================================
 
 def extraer_producto_consultado(
     respuesta
 ):
-
-    """
-    Busca:
-
-    [CONSULTAR_PRODUCTO: nombre del producto]
-    """
 
     m = re.search(
         r"\[CONSULTAR_PRODUCTO:\s*(.*?)\]",
@@ -809,11 +849,6 @@ def extraer_producto_consultado(
 def consultar_producto(
     producto
 ):
-
-    """
-    Busca cualquier producto en Airtable
-    y devuelve sus datos reales.
-    """
 
     datos, error = (
         _encontrar_producto_en_catalogo(
@@ -860,12 +895,6 @@ def generar_respuesta_con_producto(
     datos
 ):
 
-    """
-    Genera una respuesta utilizando
-    los datos reales del producto
-    encontrado en Airtable.
-    """
-
     datos_limpios = {}
 
 
@@ -893,38 +922,32 @@ def generar_respuesta_con_producto(
     instruccion = f"""
 
 El producto consultado EXISTE
-en el catalogo de Airtable.
+en el catálogo de Airtable.
 
 DATOS REALES DEL PRODUCTO:
 
 {contexto_producto}
 
-
-Mensaje actual del cliente:
+MENSAJE DEL CLIENTE:
 
 {texto}
 
-
-Responde usando unicamente
+Respondé usando únicamente
 los datos reales del producto.
-
 
 REGLAS:
 
 - No inventes precio.
 - No inventes stock.
-- No inventes caracteristicas.
-- No digas que solo vendemos la depiladora.
-- No digas que vas a consultar al encargado.
+- No inventes características.
 - Si pregunta el precio, responde el precio real.
-- Si pregunta disponibilidad, responde segun los datos reales.
+- Si pregunta disponibilidad, responde según Airtable.
 - Si pide fotos, agrega exactamente [FOTOS].
-- Si pide mas fotos, agrega exactamente [MASFOTOS].
-- Si pide video y existe una URL real, agrega [VIDEO].
-- Si no existe video, no inventes uno.
-- Si ya pidio fotos, no preguntes nuevamente si quiere verlas.
-- Responde corto, natural y en español paraguayo.
-- Mantene el estilo de Fer.
+- Si pide más fotos, agrega exactamente [MASFOTOS].
+- Si pide video y existe URL de video, agrega [VIDEO].
+- Si ya pidió fotos, no preguntes si quiere verlas.
+- Respondé corto y natural.
+- Usá español paraguayo.
 
 """
 
@@ -936,249 +959,303 @@ REGLAS:
     )
 
 
-# =================================================
-# ================= FOTOS DINAMICAS ===============
-# =================================================
+# ============================================================
+# AIRTABLE — BUSCAR PRODUCTO
+# ============================================================
 
-
-def obtener_fotos_producto(
-    datos,
-    cantidad=3,
-    desde=0
+def _normalizar_texto(
+    valor
 ):
 
-    posibles_campos = [
+    if valor is None:
 
-        "url_foto_1",
-        "url_foto_2",
-        "url_foto_3",
-        "url_foto_4",
-        "url_foto_5",
-        "url_foto_6",
+        return ""
+
+
+    if isinstance(
+        valor,
+        list
+    ):
+
+        return " ".join(
+            _normalizar_texto(
+                v
+            )
+            for v in valor
+        )
+
+
+    if isinstance(
+        valor,
+        dict
+    ):
+
+        return " ".join(
+            _normalizar_texto(
+                v
+            )
+            for v in valor.values()
+        )
+
+
+    return str(
+        valor
+    ).strip()
+
+
+def _nombre_producto(
+    fields
+):
+
+    posibles = [
+
+        "producto_id",
+
+        "Producto",
+
+        "producto",
+
+        "Nombre",
+
+        "nombre",
+
+        "name"
 
     ]
 
 
-    fotos = []
+    for campo in posibles:
 
-
-    for campo in posibles_campos:
-
-        url = datos.get(
+        valor = fields.get(
             campo
         )
 
 
-        if url:
+        if valor not in (
+            None,
+            ""
+        ):
 
-            url = str(
-                url
-            ).strip()
-
-
-            if url.startswith(
-                "http"
-            ):
-
-                fotos.append(
-                    url
-                )
+            return _normalizar_texto(
+                valor
+            )
 
 
-    return fotos[
-        desde:desde + cantidad
+    return ""
+
+
+def _encontrar_producto_en_catalogo(
+    producto
+):
+
+    url = (
+        "https://api.airtable.com/v0/"
+        +
+        AIRTABLE_BASE
+        +
+        "/"
+        +
+        TABLA_CATALOGO
+    )
+
+
+    headers = {
+
+        "Authorization":
+        f"Bearer {AIRTABLE_KEY}"
+
+    }
+
+
+    registros = []
+
+    offset = None
+
+
+    for _ in range(10):
+
+        params = {
+            "pageSize": 100
+        }
+
+
+        if offset:
+
+            params[
+                "offset"
+            ] = offset
+
+
+        r = requests.get(
+            url,
+            headers=headers,
+            params=params,
+            timeout=10
+        )
+
+
+        if r.status_code != 200:
+
+            print(
+                ">>> AIRTABLE CATALOGO ERROR:",
+                r.status_code,
+                r.text
+            )
+
+
+            return (
+                None,
+                "No pude consultar el catálogo."
+            )
+
+
+        data = r.json()
+
+
+        registros.extend(
+            data.get(
+                "records",
+                []
+            )
+        )
+
+
+        offset = data.get(
+            "offset"
+        )
+
+
+        if not offset:
+
+            break
+
+
+    consulta = _normalizar_texto(
+        producto
+    ).lower()
+
+
+    consulta = re.sub(
+        r"\s+",
+        " ",
+        consulta
+    ).strip()
+
+
+    # COINCIDENCIA EXACTA
+
+    for registro in registros:
+
+        fields = registro.get(
+            "fields",
+            {}
+        )
+
+
+        nombre = _nombre_producto(
+            fields
+        ).lower()
+
+
+        if nombre == consulta:
+
+            return fields, None
+
+
+    # COINCIDENCIA PARCIAL
+
+    for registro in registros:
+
+        fields = registro.get(
+            "fields",
+            {}
+        )
+
+
+        nombre = _nombre_producto(
+            fields
+        ).lower()
+
+
+        if (
+            consulta in nombre
+            or
+            nombre in consulta
+        ):
+
+            return fields, None
+
+
+    # COINCIDENCIA POR PALABRAS
+
+    palabras = [
+
+        palabra
+
+        for palabra in re.findall(
+            r"[a-záéíóúñ0-9]+",
+            consulta,
+            flags=re.IGNORECASE
+        )
+
+        if len(
+            palabra
+        ) >= 3
+
     ]
 
 
-def revisar_fotos(
-    sender,
-    respuesta
-):
+    mejor = None
 
-    fotos = []
+    mejor_puntaje = 0
 
 
-    producto = (
-        ULTIMO_PRODUCTO_CONSULTADO.get(
-            sender
-        )
-    )
+    for registro in registros:
 
-
-    if "[FOTOS]" in respuesta:
-
-        if producto:
-
-            fotos += (
-                obtener_fotos_producto(
-                    producto,
-                    cantidad=3,
-                    desde=0
-                )
-            )
-
-
-    if "[MASFOTOS]" in respuesta:
-
-        if producto:
-
-            fotos += (
-                obtener_fotos_producto(
-                    producto,
-                    cantidad=3,
-                    desde=3
-                )
-            )
-
-
-    respuesta = (
-        respuesta
-        .replace(
-            "[FOTOS]",
-            ""
-        )
-        .replace(
-            "[MASFOTOS]",
-            ""
-        )
-        .strip()
-    )
-
-
-    return respuesta, fotos
-
-
-def revisar_video(
-    respuesta
-):
-
-    video = None
-
-
-    if "[VIDEO]" in respuesta:
-
-        video = VIDEO_URL
-
-
-        respuesta = (
-            respuesta
-            .replace(
-                "[VIDEO]",
-                ""
-            )
-            .strip()
+        fields = registro.get(
+            "fields",
+            {}
         )
 
 
-    return respuesta, video
+        nombre = _nombre_producto(
+            fields
+        ).lower()
 
 
-# =================================================
-# ================= PEDIDOS =======================
-# =================================================
-
-
-def revisar_pedido(
-    sender,
-    respuesta
-):
-
-    m = re.search(
-        r"\[PEDIDO\](.*?)\[/PEDIDO\]",
-        respuesta,
-        re.DOTALL
-    )
-
-
-    if m:
-
-        resumen = (
-            m.group(
-                1
-            ).strip()
-        )
-
-
-        avisar_telegram(
-            formatear_pedido(
-                resumen
+        palabras_nombre = set(
+            re.findall(
+                r"[a-záéíóúñ0-9]+",
+                nombre,
+                flags=re.IGNORECASE
             )
         )
 
 
-        enviar_whatsapp(
-            formatear_pedido_whatsapp(
-                resumen
-            )
+        puntaje = sum(
+
+            1
+
+            for palabra in palabras
+
+            if palabra in palabras_nombre
+
         )
 
 
-        guardar_pedido(
-            resumen
-        )
+        if puntaje > mejor_puntaje:
+
+            mejor = fields
+
+            mejor_puntaje = puntaje
 
 
-        respuesta = re.sub(
-            r"\[PEDIDO\].*?\[/PEDIDO\]",
-            "",
-            respuesta,
-            flags=re.DOTALL
-        ).strip()
+    if mejor:
+
+        return mejor, None
 
 
-    return respuesta
+    return None, None
 
 
-def revisar_interes(
-    sender,
-    respuesta
-):
-
-    m = re.search(
-        r"\[INTERES\](.*?)\[/INTERES\]",
-        respuesta,
-        re.DOTALL
-    )
-
-
-    if m:
-
-        avisar_telegram(
-            "👀 INTERES EN OTRO PRODUCTO\n"
-            "El cliente pregunto por: "
-            + m.group(
-                1
-            ).strip()
-            + f"\n(cliente: {sender})"
-        )
-
-
-        respuesta = re.sub(
-            r"\[INTERES\].*?\[/INTERES\]",
-            "",
-            respuesta,
-            flags=re.DOTALL
-        ).strip()
-
-
-    return respuesta
-
-
-def _parsear(
-    resumen
-):
-
-    datos = {}
-
-
-    for parte in resumen.split(
-        "|"
-    ):
-
-        if ":" in parte:
-
-            clave, valor = (
-                parte.split(
-                    ":",
-                    1
-           
+# ==========================================================
