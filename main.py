@@ -86,7 +86,11 @@ REGLAS: nunca inventes precios ni datos. Nunca uses el dolor de alguien para ven
 
 # Prompt para cuando habla el DUENO (Fernando), en modo prueba
 PROMPT_DUENO = """
-Estas hablando con Fernando, tu creador y dueno de Guaranistore, en MODO PRIVADO DE PRUEBAS. NO actues como vendedor y no le vendas nada. Sos su asistente de confianza: hablale con naturalidad, honestidad y de igual a igual. Ayudalo a probar el bot, respondele lo que pregunte sobre como funciona, y segui sus instrucciones de prueba. Se breve y claro. Si te pide probar el material, podes usar [FOTOS], [MASFOTOS] o [VIDEO] para que te los mande. NUNCA uses la etiqueta [PEDIDO] en este modo. Podes tutear o vosear con confianza, como a un amigo y jefe.
+Estas hablando con Fernando, tu creador y dueno de Guaranistore, en MODO PRIVADO. NO actues como vendedor. Sos su ASISTENTE de confianza y mano derecha del negocio: hablale con naturalidad, honestidad y de igual a igual, como a un amigo y jefe.
+
+Junto a su mensaje vas a recibir un bloque con DATOS REALES DE VENTAS (de la tabla Pedidos). Usalo para darle reportes concretos cuando pregunte: cuantas ventas hoy o en total, ultimos pedidos, de que ciudad vende mas, etc. Da numeros reales, no inventes. Si te pide sugerencias de que mejorar, analiza esos datos y dale ideas practicas y honestas (no le digas solo lo que quiere oir).
+
+Tambien lo ayudas a probar el bot: si te pide ver el material, podes usar [FOTOS], [MASFOTOS] o [VIDEO]. NUNCA uses la etiqueta [PEDIDO] en este modo. Se breve y claro.
 """
 
 
@@ -162,7 +166,9 @@ def responder(sender, texto):
             texto_ia = texto.strip()
         if not texto_ia:
             return  # solo activo el modo, sin instruccion extra
-        respuesta = preguntar_a_gemini([], texto_ia, PROMPT_DUENO)
+        contexto = resumen_ventas()
+        texto_con_datos = f"{contexto}\n\nMensaje del dueno: {texto_ia}"
+        respuesta = preguntar_a_gemini([], texto_con_datos, PROMPT_DUENO)
     else:
         historial = leer_historial(sender)
         respuesta = preguntar_a_gemini(historial, texto, SYSTEM_PROMPT)
@@ -243,6 +249,34 @@ def guardar_pedido(resumen):
         print(">>> AIRTABLE (pedido) error:", r.status_code, r.text)
     else:
         print(">>> PEDIDO guardado en la tabla Pedidos")
+
+
+# ---- Lee la tabla Pedidos (para los reportes del dueno)
+def leer_pedidos():
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}"}
+    r = requests.get(url, headers=headers, params={"maxRecords": 100}, timeout=10)
+    if r.status_code != 200:
+        print(">>> AIRTABLE (leer pedidos) error:", r.status_code, r.text)
+        return []
+    return [reg.get("fields", {}) for reg in r.json().get("records", [])]
+
+
+# ---- Arma un resumen de ventas para pasarselo al asistente del dueno
+def resumen_ventas():
+    pedidos = leer_pedidos()
+    hoy = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y")
+    total = len(pedidos)
+    de_hoy = sum(1 for p in pedidos if str(p.get("Fecha", "")).startswith(hoy))
+    lineas = []
+    for p in pedidos[-15:]:
+        lineas.append(f"- {p.get('Nombre','?')} | {p.get('Ciudad','?')} | "
+                      f"{p.get('Fecha','?')} | {p.get('Estado','?')}")
+    detalle = "\n".join(lineas) if lineas else "(todavia no hay pedidos)"
+    return (f"DATOS REALES DE VENTAS (tabla Pedidos):\n"
+            f"Total de pedidos: {total}\n"
+            f"Pedidos de hoy ({hoy}): {de_hoy}\n"
+            f"Ultimos pedidos:\n{detalle}")
 
 
 def revisar_fotos(respuesta):
