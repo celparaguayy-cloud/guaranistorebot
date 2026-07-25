@@ -26,6 +26,7 @@ TELEGRAM_CHAT  = os.environ["TELEGRAM_CHAT"].strip()
 CLAVE_DUENO    = os.environ.get("CLAVE_DUENO", "").strip().lower()
 
 TABLA = "Conversaciones"
+TABLA_PEDIDOS = "Pedidos"
 GRAPH = "https://graph.facebook.com/v21.0/me/messages"
 
 BASE_FOTOS = "https://raw.githubusercontent.com/celparaguayy-cloud/guaranistorebot/main/"
@@ -190,7 +191,9 @@ def responder(sender, texto):
 def revisar_pedido(sender, respuesta):
     m = re.search(r"\[PEDIDO\](.*?)\[/PEDIDO\]", respuesta, re.DOTALL)
     if m:
-        avisar_telegram(formatear_pedido(m.group(1).strip()))
+        resumen = m.group(1).strip()
+        avisar_telegram(formatear_pedido(resumen))   # aviso lindo a Telegram
+        guardar_pedido(resumen)                       # registro en la tabla Pedidos
         respuesta = re.sub(r"\[PEDIDO\].*?\[/PEDIDO\]", "", respuesta, flags=re.DOTALL).strip()
     return respuesta
 
@@ -214,6 +217,32 @@ def formatear_pedido(resumen):
         "💰  Total:      Gs. 280.000 (contra entrega)\n"
         f"🕒  {hora} hs"
     )
+
+
+# ---- Guarda el pedido cerrado en la tabla Pedidos de Airtable
+def guardar_pedido(resumen):
+    datos = {}
+    for parte in resumen.split("|"):
+        if ":" in parte:
+            clave, valor = parte.split(":", 1)
+            datos[clave.strip().lower()] = valor.strip()
+    hora = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}", "Content-Type": "application/json"}
+    cuerpo = {"fields": {
+        "Nombre":    datos.get("nombre", ""),
+        "Ciudad":    datos.get("ciudad", ""),
+        "Telefono":  datos.get("tel", ""),
+        "Direccion": datos.get("direccion", ""),
+        "Total":     "Gs. 280.000 (contra entrega)",
+        "Fecha":     hora,
+        "Estado":    "Nuevo",
+    }}
+    r = requests.post(url, headers=headers, json=cuerpo, timeout=10)
+    if r.status_code not in (200, 201):
+        print(">>> AIRTABLE (pedido) error:", r.status_code, r.text)
+    else:
+        print(">>> PEDIDO guardado en la tabla Pedidos")
 
 
 def revisar_fotos(respuesta):
