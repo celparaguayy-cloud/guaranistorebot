@@ -20,10 +20,13 @@ PAGE_TOKEN     = os.environ["PAGE_TOKEN"].strip()
 GEMINI_KEY     = os.environ["GEMINI_KEY"].strip()
 AIRTABLE_KEY   = os.environ["AIRTABLE_KEY"].strip()
 AIRTABLE_BASE  = os.environ["AIRTABLE_BASE"].strip()
+
+TABLA_PEDIDOS = "Pedidos"
+
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"].strip()
 TELEGRAM_CHAT  = os.environ["TELEGRAM_CHAT"].strip()
 CLAVE_DUENO    = os.environ.get("CLAVE_DUENO", "").strip().lower()
-WHATSAPP_DESTINO = os.environ.get("WHATSAPP_DESTINO", "").strip()   # numero con codigo de pais
+WHATSAPP_DESTINO = os.environ.get("WHATSAPP_DESTINO", "").strip()
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "").strip()   # apikey de CallMeBot
 
 TABLA         = "Conversaciones"
