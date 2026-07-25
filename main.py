@@ -684,22 +684,12 @@ def api_pedidos():
             "detalle": r.text
         }
 
-    pedidos = []
-
-    for registro in r.json().get("records", []):
-
-        campos = registro.get("fields", {})
-
-        pedidos.append({
-            "name": campos.get("Nombre", ""),
-            "city": campos.get("Ciudad", ""),
-            "phone": campos.get("Telefono", ""),
-            "product": campos.get("Producto", ""),
-            "total": campos.get("Total", ""),
-            "status": campos.get("Estado", ""),
-            "date": campos.get("Fecha", "")
-        })
+    registros = r.json().get("records", [])
 
     return {
-        "pedidos": pedidos
+        "total": len(registros),
+        "pedidos": [
+            registro.get("fields", {})
+            for registro in registros
+        ]
     }
