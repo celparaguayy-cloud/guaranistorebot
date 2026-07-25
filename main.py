@@ -660,3 +660,46 @@ def enviar_whatsapp(texto):
 @app.get("/")
 def inicio():
     return {"estado": "Fer esta prendido y esperando mensajes"}
+# ================= API PARA EL PANEL WEB =================
+
+@app.get("/api/pedidos")
+def api_pedidos():
+
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
+
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_KEY}"
+    }
+
+    r = requests.get(
+        url,
+        headers=headers,
+        params={"maxRecords": 100},
+        timeout=10
+    )
+
+    if r.status_code != 200:
+        return {
+            "error": "No se pudieron leer los pedidos",
+            "detalle": r.text
+        }
+
+    pedidos = []
+
+    for registro in r.json().get("records", []):
+
+        campos = registro.get("fields", {})
+
+        pedidos.append({
+            "name": campos.get("Nombre", ""),
+            "city": campos.get("Ciudad", ""),
+            "phone": campos.get("Telefono", ""),
+            "product": campos.get("Producto", ""),
+            "total": campos.get("Total", ""),
+            "status": campos.get("Estado", ""),
+            "date": campos.get("Fecha", "")
+        })
+
+    return {
+        "pedidos": pedidos
+    }
