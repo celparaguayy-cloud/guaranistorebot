@@ -393,4 +393,265 @@ def _encontrar_producto_en_catalogo(producto):
             break
 
     consulta = _normalizar_texto(producto).lower()
-    palabras = [w for w in re.f
+    palabras = [w for w in re.findall(r"[a-záéíóúñ0-9]+", consulta) if len(w) > 2]
+
+    # Campos que normalmente identifican el producto.
+    campos_identidad = {
+        "producto_id", "nombre", "producto", "nombre_producto", "titulo",
+        "title", "name", "sku", "codigo", "categoria"
+    }
+
+    mejor = None
+    mejor_puntaje = 0
+
+    for registro in registros:
+        campos = registro.get("fields", {})
+        identidad = " ".join(
+            _normalizar_texto(valor).lower()
+            for nombre, valor in campos.items()
+            if nombre.lower().strip() in campos_identidad
+        )
+
+        # Fallback: si no hay campos de identidad reconocibles, usa producto_id.
+        if not identidad:
+            identidad = _normalizar_texto(campos.get("producto_id", "")).lower()
+
+        if not identidad:
+            continue
+
+        puntaje = 0
+        if consulta and consulta in identidad:
+            puntaje += 100
+        puntaje += sum(1 for palabra in palabras if palabra in identidad) * 10
+
+        if puntaje > mejor_puntaje:
+            mejor = campos
+            mejor_puntaje = puntaje
+
+    if mejor is None:
+        ids = []
+        for registro in registros:
+            pid = registro.get("fields", {}).get("producto_id")
+            if pid:
+                ids.append(str(pid))
+        return None, f"No encontré '{producto}' en el catálogo. Productos registrados: {', '.join(ids)}"
+
+    return mejor, None
+
+
+def consultar_producto(producto):
+    """Devuelve los datos reales del producto desde Airtable."""
+    campos, error = _encontrar_producto_en_catalogo(producto)
+    if error:
+        return error
+
+    producto_id = campos.get("producto_id", producto)
+    datos = []
+    for nombre, valor in campos.items():
+        if valor in (None, "", [], {}):
+            continue
+        # No mandamos URLs largas como texto al modelo; las herramientas de fotos/video ya existen.
+        if nombre.lower() in {"url_foto_1", "url_foto_2", "url_foto_3", "url_video", "link_venta"}:
+            continue
+        datos.append(f"{nombre}: {_normalizar_texto(valor)}")
+
+    resultado = f"Producto encontrado: {producto_id}. Datos reales del catálogo:\n" + "\n".join(datos)
+    print(f">>> PRODUCTO AIRTABLE '{producto}': {resultado}")
+    return resultado
+
+
+# Si Gemini pidio [CONSULTAR_PRODUCTO: x], consulta el producto completo y re-arma la respuesta.
+def revisar_producto(respuesta, historial):
+    m = re.search(r"\[CONSULTAR_PRODUCTO:\s*(.*?)\]", respuesta, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return respuesta
+
+    producto = m.group(1).strip()
+    dato = consultar_producto(producto)
+    print(f">>> PRODUCTO '{producto}': consulta completada")
+
+    refuerzo = (
+        f"[DATO REAL DEL CATALOGO] El cliente pregunto por '{producto}'.\n"
+        f"{dato}\n\n"
+        "Respondele al cliente de forma natural, breve y calida usando solamente los datos reales del catalogo. "
+        "Si el producto fue encontrado, tratalo como un producto de la tienda y no digas que solo vendes la depiladora. "
+        "Si el catalogo indica disponibilidad o stock, informa eso. Si incluye precio, informa el precio real. "
+        "No menciones etiquetas, herramientas, Airtable ni sistemas."
+    )
+    final = preguntar_a_gemini(historial, refuerzo, SYSTEM_PROMPT)
+    return re.sub(r"\[CONSULTAR_PRODUCTO:.*?\]", "", final, flags=re.IGNORECASE | re.DOTALL).strip()
+
+
+# ================= HERRAMIENTA DEL AGENTE: consultar_stock =================
+# Lee el stock REAL del catalogo. Esta es la 1ra "herramienta" de verdad de Fer.
+def consultar_stock(producto):
+    # Compatibilidad con la etiqueta antigua. La consulta real ahora usa el catalogo completo.
+    return consultar_producto(producto)
+
+
+# Si Gemini pidio [CONSULTAR_STOCK: x], consulta el dato real y re-arma la respuesta
+def revisar_stock(respuesta, historial):
+    m = re.search(r"\[CONSULTAR_STOCK:\s*(.*?)\]", respuesta)
+    if not m:
+        return respuesta
+    producto = m.group(1).strip()
+    dato = consultar_stock(producto)
+    print(f">>> STOCK '{producto}': {dato}")
+    refuerzo = (
+        f"[DATO REAL DEL CATALOGO] El cliente pregunto por la disponibilidad de '{producto}'. "
+        f"Resultado real del catalogo: {dato} "
+        "Respondele al cliente de forma natural y calida con ese dato. "
+        "No menciones etiquetas, herramientas ni sistemas."
+    )
+    final = preguntar_a_gemini(historial, refuerzo, SYSTEM_PROMPT)
+    return re.sub(r"\[CONSULTAR_STOCK:.*?\]", "", final).strip()
+
+
+# ================= MEMORIA (Airtable) =================
+def leer_historial(sender):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}"}
+    params = {"filterByFormula": f"{{contact_id}}='{sender}'", "maxRecords": 100}
+    r = requests.get(url, headers=headers, params=params, timeout=10)
+    if r.status_code != 200:
+        print(">>> AIRTABLE (leer) error:", r.status_code, r.text)
+        return []
+    historial = []
+    for reg in r.json().get("records", []):
+        texto = reg.get("fields", {}).get("mensaje_entrante", "")
+        if texto.startswith("[bot] "):
+            historial.append({"rol": "model", "mensaje": texto[6:]})
+        elif texto.startswith("[user] "):
+            historial.append({"rol": "user", "mensaje": texto[7:]})
+        elif texto:
+            historial.append({"rol": "user", "mensaje": texto})
+    return historial[-20:]   # los ultimos 20 mensajes (los mas recientes de la charla)
+
+
+def guardar(sender, rol, mensaje):
+    quien = "bot" if rol == "model" else "user"
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}", "Content-Type": "application/json"}
+    cuerpo = {"fields": {"contact_id": sender, "mensaje_entrante": f"[{quien}] {mensaje}"}}
+    r = requests.post(url, headers=headers, json=cuerpo, timeout=10)
+    if r.status_code not in (200, 201):
+        print(">>> AIRTABLE (guardar) error:", r.status_code, r.text)
+
+
+# ================= CEREBRO (Gemini) =================
+def preguntar_a_gemini(historial, texto_nuevo, prompt=SYSTEM_PROMPT):
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/"
+        f"models/gemini-flash-latest:generateContent?key={GEMINI_KEY}"
+    )
+    contenidos = []
+    for m in historial:
+        contenidos.append({"role": m["rol"], "parts": [{"text": m["mensaje"]}]})
+    contenidos.append({"role": "user", "parts": [{"text": texto_nuevo}]})
+    cuerpo = {
+        "system_instruction": {"parts": [{"text": prompt}]},
+        "contents": contenidos,
+    }
+    r = requests.post(url, json=cuerpo, timeout=30)
+    if r.status_code != 200:
+        print(">>> GEMINI error:", r.status_code, r.text)
+        return "Hola! Gracias por escribir a Guaranistore. Ya te atiendo 😊"
+    data = r.json()
+    try:
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError):
+        print(">>> GEMINI raro:", json.dumps(data, ensure_ascii=False))
+        return "Hola! Gracias por escribir a Guaranistore. Ya te atiendo 😊"
+
+
+# ================= MESSENGER =================
+def enviar_a_messenger(sender, texto):
+    for pedazo in partir(texto, 1900):
+        cuerpo = {
+            "recipient": {"id": sender},
+            "messaging_type": "RESPONSE",
+            "message": {"text": pedazo},
+        }
+        r = requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=cuerpo, timeout=10)
+        print(">>> MESSENGER:", r.status_code, r.text)
+
+
+def enviar_foto(sender, url_foto):
+    cuerpo = {
+        "recipient": {"id": sender},
+        "message": {"attachment": {"type": "image",
+                                   "payload": {"url": url_foto, "is_reusable": True}}},
+    }
+    r = requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=cuerpo, timeout=15)
+    print(">>> FOTO:", r.status_code, r.text)
+
+
+def partir(texto, limite):
+    texto = texto.strip()
+    if len(texto) <= limite:
+        return [texto] if texto else ["😊"]
+    pedazos, actual = [], ""
+    for linea in texto.split("\n"):
+        if len(actual) + len(linea) + 1 > limite:
+            pedazos.append(actual.strip())
+            actual = ""
+        actual += linea + "\n"
+    if actual.strip():
+        pedazos.append(actual.strip())
+    return pedazos
+
+
+def marcar_leido(sender):
+    try:
+        requests.post(GRAPH, params={"access_token": PAGE_TOKEN},
+                      json={"recipient": {"id": sender}, "sender_action": "mark_seen"}, timeout=8)
+    except Exception:
+        pass
+
+
+def mostrar_escribiendo(sender):
+    try:
+        requests.post(GRAPH, params={"access_token": PAGE_TOKEN},
+                      json={"recipient": {"id": sender}, "sender_action": "typing_on"}, timeout=8)
+    except Exception:
+        pass
+
+
+# ================= TELEGRAM =================
+def avisar_telegram(texto):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT, "text": texto}, timeout=10)
+    print(">>> TELEGRAM:", r.status_code, r.text)
+
+
+# ================= WHATSAPP (via CallMeBot) =================
+def formatear_pedido_whatsapp(resumen):
+    d = _parsear(resumen)
+    hora = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+    return (
+        "🛍️ *PEDIDO para cargar en Zappy*\n\n"
+        "📦 Depiladora IPL — Gs. 280.000 (contra entrega)\n\n"
+        f"👤 Cliente: {d.get('nombre', '-')}\n"
+        f"📍 Ciudad: {d.get('ciudad', '-')}\n"
+        f"📞 Tel: {d.get('tel', '-')}\n"
+        f"🏠 Direccion: {d.get('direccion', '-')}\n"
+        f"🕒 {hora} hs"
+    )
+
+
+def enviar_whatsapp(texto):
+    if not (WHATSAPP_DESTINO and CALLMEBOT_APIKEY):
+        print(">>> WhatsApp no configurado (falta WHATSAPP_DESTINO o CALLMEBOT_APIKEY)")
+        return
+    url = "https://api.callmebot.com/whatsapp.php"
+    params = {"phone": WHATSAPP_DESTINO, "text": texto, "apikey": CALLMEBOT_APIKEY}
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        print(">>> WHATSAPP:", r.status_code, r.text[:150])
+    except Exception as e:
+        print(">>> WHATSAPP error:", e)
+
+
+@app.get("/")
+def inicio():
+    return {"estado": "Fer esta prendido y esperando mensajes"}
