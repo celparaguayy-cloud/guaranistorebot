@@ -28,6 +28,7 @@ CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "").strip()   # apikey de 
 
 TABLA         = "Conversaciones"
 TABLA_PEDIDOS = "Pedidos"
+TABLA_CATALOGO = "Catalogo_Espejo"
 GRAPH = "https://graph.facebook.com/v21.0/me/messages"
 
 BASE_FOTOS = "https://raw.githubusercontent.com/celparaguayy-cloud/guaranistorebot/main/"
@@ -86,6 +87,10 @@ Solo cuando el pedido esta cerrado. El cliente no la vera.
 OTROS PRODUCTOS: si el cliente pregunta por un producto que NO es la depiladora IPL, se honesto: por ahora vendes la depiladora, pero decile con amabilidad que le pasas su interes al encargado por si lo consigue. Y al FINAL de tu mensaje agrega EXACTAMENTE:
 [INTERES] <lo que pidio el cliente> [/INTERES]
 El codigo avisa al dueno. El cliente no ve la etiqueta.
+
+STOCK / DISPONIBILIDAD: si el cliente pregunta si hay stock o disponibilidad de un producto ("hay stock?", "tenes disponible?", "todavia queda?"), NO adivines ni inventes. Escribi UNICAMENTE esta etiqueta, sin nada mas:
+[CONSULTAR_STOCK: nombre del producto]
+El sistema consulta el stock real en el catalogo y despues vos le respondes al cliente con el dato verdadero.
 
 HORARIOS: atendes a cualquier hora, sin hacerlo notar.
 
@@ -180,6 +185,7 @@ def responder(sender, texto):
     else:
         historial = leer_historial(sender)
         respuesta = preguntar_a_gemini(historial, texto, SYSTEM_PROMPT)
+        respuesta = revisar_stock(respuesta, historial)
 
     print(f">>> GEMINI ({'dueno' if en_modo else 'vendedor'}): '{respuesta}'")
 
@@ -341,51 +347,33 @@ def revisar_video(respuesta):
     return respuesta, video
 
 
-# ================= MEMORIA (Airtable) =================
-def leer_historial(sender):
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA}"
+# ================= HERRAMIENTA DEL AGENTE: consultar_stock =================
+# Lee el stock REAL del catalogo. Esta es la 1ra "herramienta" de verdad de Fer.
+def consultar_stock(producto):
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_CATALOGO}"
     headers = {"Authorization": f"Bearer {AIRTABLE_KEY}"}
-    params = {"filterByFormula": f"{{contact_id}}='{sender}'", "maxRecords": 20}
-    r = requests.get(url, headers=headers, params=params, timeout=10)
+    r = requests.get(url, headers=headers, params={"maxRecords": 100}, timeout=10)
     if r.status_code != 200:
-        print(">>> AIRTABLE (leer) error:", r.status_code, r.text)
-        return []
-    historial = []
-    for reg in r.json().get("records", []):
-        texto = reg.get("fields", {}).get("mensaje_entrante", "")
-        if texto.startswith("[bot] "):
-            historial.append({"rol": "model", "mensaje": texto[6:]})
-        elif texto.startswith("[user] "):
-            historial.append({"rol": "user", "mensaje": texto[7:]})
-        elif texto:
-            historial.append({"rol": "user", "mensaje": texto})
-    return historial
+        print(">>> AIRTABLE (stock) error:", r.status_code, r.text)
+        return "No pude consultar el stock en este momento."
+    productos = [reg.get("fields", {}) for reg in r.json().get("records", [])]
+    p = (producto or "").lower().strip()
+    palabras = [w for w in p.split() if len(w) > 3]
+    for prod in productos:
+        texto_prod = (str(prod.get("nombre", "")) + " " + str(prod.get("producto_id", ""))).lower()
+        if (p and p in texto_prod) or any(w in texto_prod for w in palabras):
+            estado = prod.get("stock_estado", "desconocido")
+            return f"El producto '{prod.get('nombre', producto)}' esta: {estado}."
+    nombres = ", ".join(str(prod.get("nombre", "?")) for prod in productos)
+    return f"No encontre ese producto exacto en el catalogo. Los que tengo son: {nombres}."
 
 
-def guardar(sender, rol, mensaje):
-    quien = "bot" if rol == "model" else "user"
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA}"
-    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}", "Content-Type": "application/json"}
-    cuerpo = {"fields": {"contact_id": sender, "mensaje_entrante": f"[{quien}] {mensaje}"}}
-    r = requests.post(url, headers=headers, json=cuerpo, timeout=10)
-    if r.status_code not in (200, 201):
-        print(">>> AIRTABLE (guardar) error:", r.status_code, r.text)
-
-
-# ================= CEREBRO (Gemini) =================
-def preguntar_a_gemini(historial, texto_nuevo, prompt=SYSTEM_PROMPT):
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/"
-        f"models/gemini-flash-latest:generateContent?key={GEMINI_KEY}"
-    )
-    contenidos = []
-    for m in historial:
-        contenidos.append({"role": m["rol"], "parts": [{"text": m["mensaje"]}]})
-    contenidos.append({"role": "user", "parts": [{"text": texto_nuevo}]})
-    cuerpo = {
-        "system_instruction": {"parts": [{"text": prompt}]},
-        "contents": contenidos,
-    }
-    r = requests.post(url, json=cuerpo, timeout=30)
-    if r.status_code != 200:
-        prin
+# Si Gemini pidio [CONSULTAR_STOCK: x], consulta el dato real y re-arma la respuesta
+def revisar_stock(respuesta, historial):
+    m = re.search(r"\[CONSULTAR_STOCK:\s*(.*?)\]", respuesta)
+    if not m:
+        return respuesta
+    producto = m.group(1).strip()
+    dato = consultar_stock(producto)
+    print(f">>> STOCK '{producto}': {dato}")
+    refuerzo = (f"[DATO DEL SISTEMA] El cliente pregunto por la 
