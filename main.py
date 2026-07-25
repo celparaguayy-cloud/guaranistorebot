@@ -81,8 +81,8 @@ FLUJO: 1) Saludas UNA vez. 2) Escuchas para que/para quien. 3) Muestras valor + 
 CIERRE (los datos): necesitas SIEMPRE 4 datos, pedidos como charla, de a uno o dos, con "por favor": 1) Nombre y apellido, 2) Ciudad, 3) Telefono, 4) Direccion. Con los 4, confirma con resumen calido y agradece.
 
 >>> AVISO DE PEDIDO: cuando tengas los 4 datos Y el cliente CONFIRME, al FINAL agrega EXACTAMENTE (con las barras |):
-[PEDIDO] Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]
-Solo cuando el pedido esta cerrado. El cliente no la vera.
+[PEDIDO] Producto: <producto> | Precio: <precio real en Gs> | Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]
+Usa el NOMBRE y el PRECIO REAL del producto que el cliente compro (el que consultaste en el catalogo). Solo cuando el pedido esta cerrado. El cliente no la vera.
 
 CATALOGO DE PRODUCTOS (IMPORTANTE): Airtable es la fuente principal de verdad de los productos.
 Fer puede vender y responder sobre CUALQUIER producto que exista en la tabla Catalogo_Espejo.
@@ -252,6 +252,8 @@ def _parsear(resumen):
 def formatear_pedido(resumen):
     d = _parsear(resumen)
     hora = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+    producto = d.get("producto", "Producto")
+    precio = d.get("precio", "-")
     return (
         "🛍️  NUEVO PEDIDO — Guaranístore\n"
         "━━━━━━━━━━━━━━━\n"
@@ -260,8 +262,8 @@ def formatear_pedido(resumen):
         f"📞  Teléfono:   {d.get('tel', '-')}\n"
         f"🏠  Dirección:  {d.get('direccion', '-')}\n"
         "━━━━━━━━━━━━━━━\n"
-        "💜  Producto:   Depiladora IPL\n"
-        "💰  Total:      Gs. 280.000 (contra entrega)\n"
+        f"💜  Producto:   {producto}\n"
+        f"💰  Total:      {precio} (contra entrega)\n"
         f"🕒  {hora} hs"
     )
 
@@ -272,11 +274,12 @@ def guardar_pedido(resumen):
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
     headers = {"Authorization": f"Bearer {AIRTABLE_KEY}", "Content-Type": "application/json"}
     cuerpo = {"fields": {
+        "Producto":  d.get("producto", ""),
         "Nombre":    d.get("nombre", ""),
         "Ciudad":    d.get("ciudad", ""),
         "Telefono":  d.get("tel", ""),
         "Direccion": d.get("direccion", ""),
-        "Total":     "Gs. 280.000 (contra entrega)",
+        "Total":     d.get("precio", ""),
         "Fecha":     hora,
         "Estado":    "Nuevo",
     }}
@@ -628,9 +631,11 @@ def avisar_telegram(texto):
 def formatear_pedido_whatsapp(resumen):
     d = _parsear(resumen)
     hora = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+    producto = d.get("producto", "Producto")
+    precio = d.get("precio", "-")
     return (
         "🛍️ *PEDIDO para cargar en Zappy*\n\n"
-        "📦 Depiladora IPL — Gs. 280.000 (contra entrega)\n\n"
+        f"📦 {producto} — {precio} (contra entrega)\n\n"
         f"👤 Cliente: {d.get('nombre', '-')}\n"
         f"📍 Ciudad: {d.get('ciudad', '-')}\n"
         f"📞 Tel: {d.get('tel', '-')}\n"
