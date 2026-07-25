@@ -2,7 +2,7 @@
 FER BOT 2.0 — vendedor completo para Messenger
 IA (Gemini) + memoria (Airtable) + fotos + video + aviso de pedidos a Telegram
 + registro de pedidos en tabla + "escribiendo..." + anti-duplicados
-+ MODO DUEÑO (palabra secreta): asistente con reportes de ventas y auditor de charlas.
++ MODO DUENO (palabra secreta): asistente con reportes de ventas y auditor de charlas.
 """
 
 import os
