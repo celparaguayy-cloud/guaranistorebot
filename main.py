@@ -15,6 +15,14 @@ from fastapi import FastAPI, Request, Response, Header
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://celparaguayy-cloud.github.io"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+CLAVE_PANEL = os.environ.get("CLAVE_PANEL", "").strip()
 
 VERIFY_TOKEN   = os.environ.get("VERIFY_TOKEN", "fer123")
 PAGE_TOKEN     = os.environ["PAGE_TOKEN"].strip()
