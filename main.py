@@ -665,6 +665,151 @@ def enviar_whatsapp(texto):
     except Exception as e:
         print(">>> WHATSAPP error:", e)
 
+# ============================================================
+#  PANEL WEB — CÓDIGO PARA AGREGAR A TU main.py (guaranistorebot)
+#  Son 3 pedacitos. Te digo dónde va cada uno. NO borres nada de lo que ya tenés.
+# ============================================================
+
+
+# ------------------------------------------------------------
+#  PEDAZO 1  →  ARRIBA DE TODO, en la línea de imports.
+#  Buscá esta línea que YA tenés:
+#      from fastapi import FastAPI, Request, Response
+#  y reemplazala por esta (solo agrega "Header"):
+# ------------------------------------------------------------
+from fastapi import FastAPI, Request, Response, Header
+from fastapi.middleware.cors import CORSMiddleware
+
+
+# ------------------------------------------------------------
+#  PEDAZO 2  →  JUSTO DEBAJO de la línea  app = FastAPI()
+# ------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://celparaguayy-cloud.github.io"],  # solo tu panel
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Clave del panel (la cargás en Render como variable de entorno CLAVE_PANEL)
+CLAVE_PANEL = os.environ.get("CLAVE_PANEL", "").strip()
+
+
+# ------------------------------------------------------------
+#  PEDAZO 3  →  ANTES de la última parte, la línea  @app.get("/")
+#  Pegá TODO esto:
+# ------------------------------------------------------------
+def _panel_ok(clave):
+    return bool(CLAVE_PANEL) and clave == CLAVE_PANEL
+
+
+def _no_autorizado():
+    return Response(content='{"error":"Clave incorrecta"}',
+                    status_code=401, media_type="application/json")
+
+
+@app.get("/api/panel/resumen")
+def api_panel_resumen(x_clave: str = Header(default="")):
+    if not _panel_ok(x_clave):
+        return _no_autorizado()
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {AIRTABLE_KEY}"},
+                     params={"maxRecords": 100}, timeout=10)
+    registros = r.json().get("records", []) if r.status_code == 200 else []
+    pedidos = [x.get("fields", {}) for x in registros]
+    hoy = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y")
+    total = len(pedidos)
+    de_hoy = sum(1 for p in pedidos if str(p.get("Fecha", "")).startswith(hoy))
+    entregados = sum(1 for p in pedidos if str(p.get("Estado", "")).lower() == "entregado")
+    nuevos = sum(1 for p in pedidos if str(p.get("Estado", "")).lower() == "nuevo")
+    return {"total": total, "hoy": de_hoy, "entregados": entregados, "nuevos": nuevos}
+
+
+@app.get("/api/panel/pedidos")
+def api_panel_pedidos(x_clave: str = Header(default="")):
+    if not _panel_ok(x_clave):
+        return _no_autorizado()
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {AIRTABLE_KEY}"},
+                     params={"maxRecords": 100}, timeout=10)
+    if r.status_code != 200:
+        return {"pedidos": [], "error": r.text}
+    pedidos = []
+    for reg in r.json().get("records", []):
+        f = reg.get("fields", {})
+        pedidos.append({
+            "id": reg.get("id", ""),
+            "producto": f.get("Producto", ""),
+            "nombre": f.get("Nombre", ""),
+            "ciudad": f.get("Ciudad", ""),
+            "telefono": f.get("Telefono", ""),
+            "direccion": f.get("Direccion", ""),
+            "total": f.get("Total", ""),
+            "fecha": f.get("Fecha", ""),
+            "estado": f.get("Estado", "") or "Nuevo",
+        })
+    pedidos.reverse()  # los más nuevos primero
+    return {"pedidos": pedidos}
+
+
+@app.post("/api/panel/pedido")
+async def api_panel_crear_pedido(request: Request, x_clave: str = Header(default="")):
+    if not _panel_ok(x_clave):
+        return _no_autorizado()
+    datos = await request.json()
+    hora = datetime.now(timezone(timedelta(hours=-3))).strftime("%d/%m/%Y %H:%M")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}", "Content-Type": "application/json"}
+    cuerpo = {"fields": {
+        "Producto":  datos.get("producto", ""),
+        "Nombre":    datos.get("nombre", ""),
+        "Ciudad":    datos.get("ciudad", ""),
+        "Telefono":  datos.get("telefono", ""),
+        "Direccion": datos.get("direccion", ""),
+        "Total":     datos.get("total", ""),
+        "Fecha":     hora,
+        "Estado":    datos.get("estado", "Nuevo"),
+    }}
+    r = requests.post(url, headers=headers, json=cuerpo, timeout=10)
+    if r.status_code not in (200, 201):
+        return {"ok": False, "error": r.text}
+    return {"ok": True}
+
+
+@app.post("/api/panel/estado")
+async def api_panel_estado(request: Request, x_clave: str = Header(default="")):
+    if not _panel_ok(x_clave):
+        return _no_autorizado()
+    datos = await request.json()
+    rid = datos.get("id", "")
+    nuevo = datos.get("estado", "")
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}/{rid}"
+    headers = {"Authorization": f"Bearer {AIRTABLE_KEY}", "Content-Type": "application/json"}
+    r = requests.patch(url, headers=headers, json={"fields": {"Estado": nuevo}}, timeout=10)
+    if r.status_code != 200:
+        return {"ok": False, "error": r.text}
+    return {"ok": True}
+
+
+@app.get("/api/panel/catalogo")
+def api_panel_catalogo(x_clave: str = Header(default="")):
+    if not _panel_ok(x_clave):
+        return _no_autorizado()
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_CATALOGO}"
+    r = requests.get(url, headers={"Authorization": f"Bearer {AIRTABLE_KEY}"},
+                     params={"maxRecords": 100}, timeout=10)
+    if r.status_code != 200:
+        return {"productos": [], "error": r.text}
+    productos = []
+    for reg in r.json().get("records", []):
+        f = reg.get("fields", {})
+        productos.append({
+            "nombre":      f.get("nombre", "") or f.get("producto_id", ""),
+            "precio":      f.get("precio_gs", ""),
+            "stock":       f.get("stock_estado", ""),
+            "descripcion": f.get("descripcion_corta", ""),
+        })
+    return {"productos": productos}
 
 @app.get("/")
 def inicio():
