@@ -11,7 +11,8 @@ import json
 import traceback
 from datetime import datetime, timezone, timedelta
 import requests
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, Header
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
