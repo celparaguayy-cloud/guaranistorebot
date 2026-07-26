@@ -20,13 +20,10 @@ PAGE_TOKEN     = os.environ["PAGE_TOKEN"].strip()
 GEMINI_KEY     = os.environ["GEMINI_KEY"].strip()
 AIRTABLE_KEY   = os.environ["AIRTABLE_KEY"].strip()
 AIRTABLE_BASE  = os.environ["AIRTABLE_BASE"].strip()
-
-TABLA_PEDIDOS = "Pedidos"
-
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"].strip()
 TELEGRAM_CHAT  = os.environ["TELEGRAM_CHAT"].strip()
 CLAVE_DUENO    = os.environ.get("CLAVE_DUENO", "").strip().lower()
-WHATSAPP_DESTINO = os.environ.get("WHATSAPP_DESTINO", "").strip()
+WHATSAPP_DESTINO = os.environ.get("WHATSAPP_DESTINO", "").strip()   # numero con codigo de pais
 CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "").strip()   # apikey de CallMeBot
 
 TABLA         = "Conversaciones"
@@ -663,36 +660,3 @@ def enviar_whatsapp(texto):
 @app.get("/")
 def inicio():
     return {"estado": "Fer esta prendido y esperando mensajes"}
-# ================= API PARA EL PANEL WEB =================
-
-@app.get("/api/pedidos")
-def api_pedidos():
-
-    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE}/{TABLA_PEDIDOS}"
-
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_KEY}"
-    }
-
-    r = requests.get(
-        url,
-        headers=headers,
-        params={"maxRecords": 100},
-        timeout=10
-    )
-
-    if r.status_code != 200:
-        return {
-            "error": "No se pudieron leer los pedidos",
-            "detalle": r.text
-        }
-
-    registros = r.json().get("records", [])
-
-    return {
-        "total": len(registros),
-        "pedidos": [
-            registro.get("fields", {})
-            for registro in registros
-        ]
-    }
