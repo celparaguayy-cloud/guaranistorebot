@@ -47,15 +47,24 @@ def ahora(): return datetime.now(AR).strftime("%d/%m/%Y %H:%M")
 SYSTEM_PROMPT = """Sos "Fer", el vendedor de la tienda paraguaya %s. Hablás en español paraguayo, cálido, cercano y humano (podés usar voseo). Sos honesto y nunca mentís.
 
 TU FORMA DE VENDER:
-- Acompañás a la persona con calidez y empatía. Si cuenta un problema personal o económico, dejás de vender y la tratás como persona.
-- Vendés con confianza pero sin mentir: nunca inventes testimonios, ni falsa urgencia, ni precios que no sabés. El pago contra entrega y la garantía son tus mejores argumentos: la persona paga cuando recibe.
-- Podés vender CUALQUIER producto del catálogo, no uno solo.
+- Acompañás con calidez y empatía. Si la persona cuenta un problema personal o económico, dejás de vender y la tratás como persona.
+- Vendés con confianza pero sin mentir: nunca inventes testimonios, ni falsa urgencia, ni precios que no sabés. El pago CONTRA ENTREGA y la garantía son tus mejores argumentos: paga cuando recibe.
+- Podés vender CUALQUIER producto del catálogo.
+
+CERRÁ LA VENTA, NO DEJES LA CHARLA A MEDIAS (importante):
+- Después de responder una duda, SIEMPRE dá el siguiente paso: preguntá de qué ciudad es, ofrecé reservar el pedido, o pedí los datos para el envío. Nunca cortes con un "cualquier cosa avisá".
+- Si la persona duda, preguntá con cariño qué es lo que la frena y resolvé ESA duda.
+- Si responde corto o se queda callada, retomá con calidez y una pregunta simple que la haga avanzar (ej: "¿Te lo reservo?").
+- Recordale que no paga nada por adelantado: paga cuando lo recibe en la mano.
+
+SI TE PIDEN EL WHATSAPP:
+- No des un número que no tenés. Respondé con calidez que por acá mismo la atendés igual de rápido y ya le dejás el pedido reservado. Ej: "Por acá mismo te atiendo al toque 😊, ya te lo reservo. ¿De qué ciudad sos?"
 
 HERRAMIENTAS (etiquetas que el código detecta; el cliente NO las ve):
-- Para saber precio, stock o datos de un producto, escribí: [CONSULTAR_PRODUCTO: nombre del producto]. Esperás el dato real y recién ahí respondés.
+- Para saber precio, stock o datos de un producto: [CONSULTAR_PRODUCTO: nombre del producto]. Esperás el dato real y recién ahí respondés.
 - Para mandar fotos: [FOTOS]  (y si piden más: [MASFOTOS])
 - Para mandar el video: [VIDEO]
-- Si el cliente pregunta por un producto que no manejás o querés avisar al dueño de un interés: [INTERES] lo que pidió [/INTERES]
+- Si preguntan por un producto que no manejás o querés avisar al dueño de un interés: [INTERES] lo que pidió [/INTERES]
 - Cuando el pedido esté CERRADO y confirmado, con los datos, al final agregá EXACTAMENTE:
 [PEDIDO] Producto: <producto> | Precio: <precio real en Gs> | Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]
 Usá el nombre y el precio REAL del producto (el que consultaste). El cliente no ve esta etiqueta.
@@ -439,6 +448,26 @@ async def panel_fer(request: Request, x_clave: str = Header(default="")):
     if not mensaje: return {"respuesta": "Decime qué querés saber: ventas de hoy, últimos pedidos, qué mejorar…"}
     contexto = resumen_ventas() + "\n\n=== CONVERSACIONES ===\n" + leer_conversaciones()
     return {"respuesta": preguntar_a_gemini([], contexto + "\n\nMensaje del dueño: " + mensaje, PROMPT_DUENO)}
+
+@app.get("/api/panel/conversaciones")
+def panel_conversaciones(x_clave: str = Header(default="")):
+    if not _panel_ok(x_clave): return _no_auth()
+    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
+                     headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"maxRecords": 200}, timeout=10)
+    if r.status_code != 200: return {"conversaciones": [], "error": r.text}
+    grupos, orden = {}, []
+    for reg in r.json().get("records", []):
+        f = reg.get("fields", {})
+        cid = f.get("contact_id", ""); txt = f.get("mensaje_entrante", "")
+        if not cid or not txt: continue
+        if txt.startswith("[user]"): rol, limpio = "cliente", txt[6:].strip()
+        elif txt.startswith("[bot]"): rol, limpio = "fer", txt[5:].strip()
+        else: rol, limpio = "cliente", txt.strip()
+        if cid not in grupos: grupos[cid] = []; orden.append(cid)
+        grupos[cid].append({"rol": rol, "texto": limpio})
+    salida = [{"id": cid, "ultimo": (grupos[cid][-1]["texto"] if grupos[cid] else "")[:70], "mensajes": grupos[cid]} for cid in orden]
+    salida.reverse()
+    return {"conversaciones": salida}
 
 @app.get("/")
 def inicio():
