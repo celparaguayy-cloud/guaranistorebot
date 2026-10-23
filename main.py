@@ -1,16 +1,30 @@
 # ============================================================
-#  🤖 main.py — PARA EL BOT (Render, repo guaranistorebot)
-#  Reemplaza TODO tu main.py por esto (subilo con "Upload files").
+#  🤖 main.py — FER MULTI-NEGOCIO (Render, repo guaranistorebot)
+#  Un solo bot que atiende a VARIOS negocios a la vez.
 #
-#  ⚠️ COLUMNAS QUE NECESITÁS EN AIRTABLE para las funciones nuevas:
-#   - Tabla Pedidos: agregá una columna de texto  "Contacto"
-#                    (guarda el ID del cliente, para linkear su comprobante)
-#   - Tabla Catalogo_Espejo: ya usa "stock_estado" (disponible/agotado).
-#                    Si querés stock numérico, agregá una columna "stock".
+#  - Guaranístore sigue funcionando con las MISMAS variables de Render
+#    de siempre (PAGE_TOKEN, AIRTABLE_BASE, CLAVE_PANEL, etc.).
+#  - Cada negocio nuevo se carga desde admin.html y se guarda en Upstash:
+#    su página de Facebook, su base de Airtable, su clave de panel,
+#    su Telegram y su forma de vender.
+#
+#  VARIABLES NUEVAS (todas opcionales; sin ellas Guaranístore anda igual):
+#   - ADMIN_CLAVE      clave para entrar a admin.html (larga, inventada por vos)
+#   - PAGE_ID          id de la página de Guaranístore (si falta, se averigua solo)
+#   - META_APP_ID      id de tu app de Meta
+#   - META_APP_SECRET  clave secreta de tu app de Meta (para tokens que no vencen)
+#   - VERIFICAR_FIRMA  poné 1 para aceptar solo mensajes firmados por Meta
+#
+#  ⚠️ COLUMNAS QUE NECESITA LA BASE DE AIRTABLE DE CADA NEGOCIO:
+#   - Pedidos: Producto, Nombre, Ciudad, Telefono, Direccion, Total, Fecha,
+#              Estado, Contacto
+#   - Catalogo_Espejo: producto_id, nombre, precio_gs, costo_gs,
+#              stock_estado, descripcion_corta (opcional: stock numérico)
+#   - Conversaciones: contact_id, canal, mensaje_entrante
 # ============================================================
-import os, re, json, base64, unicodedata, requests
+import os, re, json, time, hmac, base64, hashlib, threading, contextvars, unicodedata, requests
 from datetime import datetime, timezone, timedelta
-from fastapi import FastAPI, Request, Response, Header
+from fastapi import FastAPI, Request, Response, Header, Depends, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -20,7 +34,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# ---------- CONFIG ----------
+# ---------- CONFIG (Guaranístore, variables de Render de siempre) ----------
 TIENDA        = "Guaranistore"
 VERIFY_TOKEN  = os.environ.get("VERIFY_TOKEN", "fer123")
 PAGE_TOKEN    = os.environ["PAGE_TOKEN"].strip()
@@ -35,12 +49,20 @@ CALLMEBOT_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "").strip()
 CLAVE_PANEL   = os.environ.get("CLAVE_PANEL", "").strip()
 ENVIO_INTERIOR = int(os.environ.get("ENVIO_INTERIOR", "25000"))  # costo extra fuera de Central
 
+# ---------- CONFIG NUEVA (multi-negocio, opcional) ----------
+PAGE_ID         = os.environ.get("PAGE_ID", "").strip()
+ADMIN_CLAVE     = os.environ.get("ADMIN_CLAVE", "").strip()
+META_APP_ID     = os.environ.get("META_APP_ID", "").strip()
+META_APP_SECRET = os.environ.get("META_APP_SECRET", "").strip()
+VERIFICAR_FIRMA = os.environ.get("VERIFICAR_FIRMA", "").strip() == "1"
+
 TABLA_CONVERS  = "Conversaciones"
 TABLA_PEDIDOS  = "Pedidos"
 TABLA_CATALOGO = "Catalogo_Espejo"
 
-GRAPH  = "https://graph.facebook.com/v21.0/me/messages"
-GEMINI = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key=" + GEMINI_KEY
+GRAPH_API = "https://graph.facebook.com/v21.0"
+GRAPH  = GRAPH_API + "/me/messages"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key="
 REPO_FOTOS = "https://raw.githubusercontent.com/celparaguayy-cloud/guaranistorebot/main/"
 FOTOS = [REPO_FOTOS + "ipl%d.jpg" % i for i in range(1, 7)]
 VIDEO = "https://youtube.com/shorts/0WoRz-Nzucw"
@@ -57,7 +79,9 @@ CENTRAL = set([
 ])
 
 # ---------- PROMPTS ----------
-SYSTEM_PROMPT = """Sos "Fer", el vendedor de la tienda paraguaya %s. Hablás en español paraguayo, cálido, cercano y humano (podés usar voseo). Sos honesto y nunca mentís. Tu meta es ayudar a la persona a decidirse y CERRAR el pedido, sin presionar de más.
+# La forma de vender de siempre. Para Guaranístore queda EXACTAMENTE igual que antes;
+# los negocios nuevos la usan como base si no cargan una propia.
+PROMPT_VENTA = """Sos "%(vendedor)s", el vendedor de la tienda paraguaya %(tienda)s. Hablás en español paraguayo, cálido, cercano y humano (podés usar voseo). Sos honesto y nunca mentís. Tu meta es ayudar a la persona a decidirse y CERRAR el pedido, sin presionar de más.
 
 TU FORMA DE VENDER:
 - Calidez primero. Si la persona cuenta un problema personal o económico, dejás de vender y la tratás como persona.
@@ -88,18 +112,28 @@ SI TE PIDEN EL WHATSAPP: no des un número que no tenés. Decile con calidez que
 
 VENDER UN POCO MÁS: cuando ya cerraste un pedido, con naturalidad y sin insistir podés ofrecerle UN producto extra que combine ("¿Querés que te sume también...?"). Si dice que no, lo dejás tranquilo.
 
-HERRAMIENTAS (etiquetas que el código detecta; el cliente NO las ve):
-- Precio/stock/datos de un producto: [CONSULTAR_PRODUCTO: nombre]. Esperás el dato real y recién ahí respondés.
-- Fotos: [FOTOS]  (más fotos: [MASFOTOS])
-- Video: [VIDEO]
-- Interés en otro producto / aviso al dueño: [INTERES] lo que pidió [/INTERES]
-- Pedido CERRADO y confirmado, al final agregá EXACTAMENTE:
-[PEDIDO] Producto: <producto> | Precio: <precio real en Gs> | Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]
-Usá el nombre y el precio REAL del producto. El cliente no ve esta etiqueta.
+"""
 
-Sé breve, humano y claro (mensajes cortos, de chat). Nunca digas que sos una IA.""" % TIENDA
+PIE_PROMPT = "\n\nSé breve, humano y claro (mensajes cortos, de chat). Nunca digas que sos una IA."
 
-PROMPT_DUENO = """Sos el asistente PRIVADO del dueño de %s (modo dueño). Le hablás como su mano derecha del negocio: claro, directo y útil. Con los datos de ventas, productos y conversaciones que te paso, respondé lo que pregunte: resúmenes, estado de pedidos, qué producto conviene impulsar, objeciones frecuentes y recomendaciones concretas para vender más. Sé honesto, sin inventar.""" % TIENDA
+def _herramientas(fotos=True, mas_fotos=True, video=True):
+    """Las etiquetas que el código detecta. Si un negocio no tiene fotos o video, no se las ofrece."""
+    lineas = ["HERRAMIENTAS (etiquetas que el código detecta; el cliente NO las ve):",
+              "- Precio/stock/datos de un producto: [CONSULTAR_PRODUCTO: nombre]. Esperás el dato real y recién ahí respondés."]
+    if fotos: lineas.append("- Fotos: [FOTOS]  (más fotos: [MASFOTOS])" if mas_fotos else "- Fotos: [FOTOS]")
+    if video: lineas.append("- Video: [VIDEO]")
+    lineas += ["- Interés en otro producto / aviso al dueño: [INTERES] lo que pidió [/INTERES]",
+               "- Pedido CERRADO y confirmado, al final agregá EXACTAMENTE:",
+               "[PEDIDO] Producto: <producto> | Precio: <precio real en Gs> | Nombre: <nombre> | Ciudad: <ciudad> | Tel: <telefono> | Direccion: <direccion> [/PEDIDO]",
+               "Usá el nombre y el precio REAL del producto. El cliente no ve esta etiqueta."]
+    if not fotos: lineas.append("No tenés fotos para mandar por acá: no las prometas.")
+    if not video: lineas.append("No tenés video para mandar por acá: no lo prometas.")
+    return "\n".join(lineas)
+
+SYSTEM_PROMPT = PROMPT_VENTA % {"vendedor": "Fer", "tienda": TIENDA} + _herramientas() + PIE_PROMPT
+
+PROMPT_DUENO_BASE = """Sos el asistente PRIVADO del dueño de %s (modo dueño). Le hablás como su mano derecha del negocio: claro, directo y útil. Con los datos de ventas, productos y conversaciones que te paso, respondé lo que pregunte: resúmenes, estado de pedidos, qué producto conviene impulsar, objeciones frecuentes y recomendaciones concretas para vender más. Sé honesto, sin inventar."""
+PROMPT_DUENO = PROMPT_DUENO_BASE % TIENDA
 
 # ---------- UTILIDADES ----------
 def _norm(t):
@@ -110,6 +144,23 @@ def _norm(t):
 def _solo_numero(s):
     return int(re.sub(r"[^\d]", "", str(s or "")) or 0)
 
+def _igual(a, b):
+    """Compara claves sin filtrar pistas por el tiempo de respuesta. Vacío nunca coincide."""
+    a, b = str(a or ""), str(b or "")
+    return bool(a) and bool(b) and hmac.compare_digest(a.encode(), b.encode())
+
+_RID = re.compile(r"^rec[A-Za-z0-9]{14}$")
+def _rid(valor):
+    """Id de registro de Airtable válido (recXXXXXXXXXXXXXX) o "" si no lo es."""
+    valor = str(valor or "").strip()
+    return valor if _RID.match(valor) else ""
+
+async def _cuerpo(request: Request):
+    """El JSON que manda el navegador (como antes: no exige cabecera, y si no viene nada da {})."""
+    try: d = await request.json()
+    except Exception: d = {}
+    return d if isinstance(d, dict) else {}
+
 def descargar(url):
     try:
         r = requests.get(url, timeout=20)
@@ -118,6 +169,113 @@ def descargar(url):
     except Exception:
         pass
     return None, None
+
+# ============================================================
+#   NEGOCIOS (multi-cliente)
+# ============================================================
+# Lo que se guarda de cada negocio. Los valores son los de por defecto.
+CAMPOS_NEGOCIO = {
+    "id": "", "nombre": "", "vendedor": "Fer", "activo": True,
+    "page_id": "", "page_token": "",
+    "airtable_base": "", "airtable_key": "",
+    "telegram_chat": "", "telegram_token": "",
+    "clave_panel": "", "clave_dueno": "",
+    "prompt": "", "envio_interior": 25000,
+    "fotos": [], "video": "",
+    "whatsapp_destino": "", "callmebot_apikey": "",
+    "gemini_key": "", "notas": "", "creado": "",
+}
+# Nunca se muestran enteros en admin.html (solo los últimos 4 caracteres).
+SECRETOS = ("page_token", "airtable_key", "telegram_token", "callmebot_apikey", "gemini_key")
+
+def _limpiar_negocio(d):
+    """Deja los datos de un negocio con el tipo correcto y sin campos extra."""
+    out = {}
+    for k, defecto in CAMPOS_NEGOCIO.items():
+        v = d.get(k, defecto)
+        if isinstance(defecto, bool):
+            v = v if isinstance(v, bool) else str(v).strip().lower() in ("1", "true", "si", "sí", "on")
+        elif isinstance(defecto, int):
+            v = _solo_numero(v) if str(v if v is not None else "").strip() != "" else defecto
+        elif isinstance(defecto, list):
+            items = v if isinstance(v, list) else str(v or "").splitlines()
+            v = [str(u).strip() for u in items if str(u).strip()]
+        else:
+            v = str(v if v is not None else "").strip()
+        out[k] = v
+    out["clave_dueno"] = out["clave_dueno"].lower()
+    out["prompt"] = out["prompt"][:12000]
+    return out
+
+class Negocio:
+    def __init__(self, datos, principal=False):
+        d = datos if principal else _limpiar_negocio(datos)
+        self.datos = d
+        self.principal = principal
+        for k in CAMPOS_NEGOCIO:
+            setattr(self, k, d.get(k, CAMPOS_NEGOCIO[k]))
+        if principal:
+            self.system_prompt = SYSTEM_PROMPT
+            self.prompt_dueno = PROMPT_DUENO
+            self.marca_aviso = "GUARANÍSTORE"
+        else:
+            # lo que el negocio no cargue, usa lo tuyo (tu Gemini, tu Airtable, tu bot de Telegram)
+            self.airtable_key = self.airtable_key or AIRTABLE_KEY
+            self.telegram_token = self.telegram_token or TELEGRAM_TOKEN
+            self.gemini_key = self.gemini_key or GEMINI_KEY
+            self.vendedor = self.vendedor or "Fer"
+            herramientas = _herramientas(len(self.fotos) > 0, len(self.fotos) > 3, bool(self.video))
+            if self.prompt:
+                self.system_prompt = self.prompt + "\n\n" + herramientas + "\n\nSé breve, humano y claro (mensajes cortos, de chat)."
+            else:
+                self.system_prompt = PROMPT_VENTA % {"vendedor": self.vendedor, "tienda": self.nombre} + herramientas + PIE_PROMPT
+            self.prompt_dueno = PROMPT_DUENO_BASE % self.nombre
+            self.marca_aviso = self.nombre.upper()
+
+    def clave_historial(self, sender):
+        # Guaranístore conserva la memoria de siempre ("hist:<cliente>")
+        return "hist:%s" % sender if self.principal else "hist:%s:%s" % (self.id, sender)
+
+    def clave_config(self):
+        return "config:negocio" if self.principal else "config:%s" % self.id
+
+    def conectado(self):
+        return bool(self.page_id and self.page_token)
+
+PRINCIPAL = Negocio({
+    "id": "principal", "nombre": TIENDA, "vendedor": "Fer", "activo": True,
+    "page_id": PAGE_ID, "page_token": PAGE_TOKEN,
+    "airtable_base": AIRTABLE_BASE, "airtable_key": AIRTABLE_KEY,
+    "telegram_chat": TELEGRAM_CHAT, "telegram_token": TELEGRAM_TOKEN,
+    "clave_panel": CLAVE_PANEL, "clave_dueno": CLAVE_DUENO,
+    "prompt": "", "envio_interior": ENVIO_INTERIOR,
+    "fotos": FOTOS, "video": VIDEO,
+    "whatsapp_destino": WHATSAPP_DESTINO, "callmebot_apikey": CALLMEBOT_APIKEY,
+    "gemini_key": GEMINI_KEY, "notas": "", "creado": "",
+}, principal=True)
+
+# El negocio que se está atendiendo AHORA (cada mensaje o pedido del panel tiene el suyo,
+# así dos negocios atendidos al mismo tiempo nunca se mezclan).
+_ACTUAL = contextvars.ContextVar("negocio_actual", default=None)
+_PAUSADO = contextvars.ContextVar("panel_pausado", default=False)
+
+def N():
+    return _ACTUAL.get() or PRINCIPAL
+
+def usar(negocio):
+    _ACTUAL.set(negocio)
+    return negocio
+
+def _at_url(tabla, rid=""):
+    return "https://api.airtable.com/v0/%s/%s%s" % (N().airtable_base, tabla, ("/" + rid) if rid else "")
+
+def _at_hdr(con_json=False):
+    h = {"Authorization": "Bearer " + N().airtable_key}
+    if con_json: h["Content-Type"] = "application/json"
+    return h
+
+def _gemini():
+    return GEMINI_URL + N().gemini_key
 
 # ---------- FOTOS DE AIRTABLE (fix de URLs) ----------
 def extraer_urls_fotos_airtable(registro):
@@ -139,25 +297,26 @@ def extraer_urls_fotos_airtable(registro):
 
 def enviar_foto_messenger(recipient_id, image_url, fallback_url=None):
     """Envía una foto por Messenger. Si Meta responde != 200, reintenta con la fallback_url."""
+    token = N().page_token
     payload = {"recipient": {"id": recipient_id},
                "message": {"attachment": {"type": "image", "payload": {"url": image_url, "is_reusable": True}}}}
     try:
-        r = requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=payload, timeout=15)
+        r = requests.post(GRAPH, params={"access_token": token}, json=payload, timeout=15)
         if r.status_code != 200 and fallback_url and fallback_url != image_url:
             payload["message"]["attachment"]["payload"]["url"] = fallback_url
-            r = requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=payload, timeout=15)
+            r = requests.post(GRAPH, params={"access_token": token}, json=payload, timeout=15)
         print(">>> FOTO:", r.status_code, r.text[:100])
     except Exception as e:
         if fallback_url and fallback_url != image_url:
             payload["message"]["attachment"]["payload"]["url"] = fallback_url
-            try: requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=payload, timeout=15)
+            try: requests.post(GRAPH, params={"access_token": token}, json=payload, timeout=15)
             except Exception: pass
         print(">>> FOTO error:", e)
 
 # ---------- CATALOGO DINAMICO ----------
 def _leer_catalogo():
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CATALOGO)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY}
+    url = _at_url(TABLA_CATALOGO)
+    headers = _at_hdr()
     registros, offset = [], None
     for _ in range(10):
         params = {"pageSize": 100}
@@ -212,10 +371,9 @@ def revisar_producto(respuesta, historial):
     refuerzo = ("El sistema consultó el catálogo: %s\nCon ESE dato real (incluido si hay stock), "
                 "respondele al cliente de forma natural. Si está AGOTADO, no lo vendas. "
                 "No muestres la etiqueta ni digas 'el sistema'." % dato)
-    final = preguntar_a_gemini(historial, refuerzo, SYSTEM_PROMPT)
+    final = preguntar_a_gemini(historial, refuerzo, N().system_prompt)
     return re.sub(r"\[CONSULTAR_PRODUCTO:.*?\]", "", final, flags=re.IGNORECASE | re.DOTALL).strip()
 
-# ---------- MEMORIA ----------
 # ---------- MEMORIA (Upstash Redis, persistente) ----------
 # Las claves se cargan en Render como variables de entorno (NO van en el código).
 UPSTASH_URL   = os.environ.get("UPSTASH_REDIS_REST_URL", "").strip().rstrip("/")
@@ -235,10 +393,10 @@ def _upstash(comando):
     return None
 
 def leer_historial(sender):
-    key = "hist:" + str(sender)
+    key = N().clave_historial(sender)
     res = _upstash(["LRANGE", key, "0", "-1"])
     if res is None:
-        return HISTORIAL.get(sender, [])[-20:]   # respaldo RAM
+        return HISTORIAL.get(key, [])[-20:]   # respaldo RAM
     hist = []
     for txt in res[-20:]:
         if txt.startswith("[user]"): hist.append(("user", txt[6:].strip()))
@@ -248,19 +406,88 @@ def leer_historial(sender):
 def guardar(sender, rol, mensaje, canal="messenger"):
     prefijo = "[user] " if rol == "user" else "[bot] "
     linea = prefijo + mensaje
-    key = "hist:" + str(sender)
+    key = N().clave_historial(sender)
     if _upstash(["RPUSH", key, linea]) is not None:
         _upstash(["LTRIM", key, "-40", "-1"])          # deja solo los últimos 40
         _upstash(["EXPIRE", key, "2592000"])           # se autolimpia a los 30 días
     else:
-        HISTORIAL.setdefault(sender, []).append((rol, mensaje))   # respaldo RAM
-        if len(HISTORIAL[sender]) > 40: HISTORIAL[sender] = HISTORIAL[sender][-40:]
+        HISTORIAL.setdefault(key, []).append((rol, mensaje))   # respaldo RAM
+        if len(HISTORIAL[key]) > 40: HISTORIAL[key] = HISTORIAL[key][-40:]
     # Además guarda en Airtable (solo para el visor de Charlas del panel)
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"}
     cuerpo = {"fields": {"contact_id": sender, "canal": canal, "mensaje_entrante": linea}}
-    try: requests.post(url, headers=headers, json=cuerpo, timeout=10)
+    try: requests.post(_at_url(TABLA_CONVERS), headers=_at_hdr(True), json=cuerpo, timeout=10)
     except Exception: pass
+
+# ---------- REGISTRO DE NEGOCIOS (Upstash, hash "negocios") ----------
+_REG = {"ts": 0.0, "lista": []}
+_REG_LOCK = threading.Lock()
+REG_SEGUNDOS = 30   # cada cuánto se vuelve a leer la lista de negocios
+
+def negocios_guardados(fresco=False):
+    with _REG_LOCK:
+        if not fresco and _REG["ts"] and time.time() - _REG["ts"] < REG_SEGUNDOS:
+            return _REG["lista"]
+    res = _upstash(["HGETALL", "negocios"])
+    with _REG_LOCK:
+        _REG["ts"] = time.time()
+        if res is None:
+            return _REG["lista"]          # Upstash no responde: sigue con lo último que leyó
+        lista = []
+        for i in range(0, len(res) - 1, 2):
+            try: lista.append(Negocio(json.loads(res[i + 1])))
+            except Exception as e: print(">>> NEGOCIO ilegible:", res[i], e)
+        _REG["lista"] = lista
+        return lista
+
+def _negocio_guardado(nid):
+    """Datos crudos de un negocio, leídos directo de Upstash (para editar)."""
+    res = _upstash(["HGET", "negocios", nid])
+    if not res: return None
+    try: return json.loads(res)
+    except Exception: return None
+
+def _guardar_negocio(datos):
+    ok = _upstash(["HSET", "negocios", datos["id"], json.dumps(datos, ensure_ascii=False)]) is not None
+    with _REG_LOCK: _REG["ts"] = 0.0
+    return ok
+
+def _borrar_negocio(nid):
+    ok = _upstash(["HDEL", "negocios", nid]) is not None
+    with _REG_LOCK: _REG["ts"] = 0.0
+    return ok
+
+def negocio_por_id(nid):
+    if nid == "principal": return PRINCIPAL
+    return next((n for n in negocios_guardados() if n.id == nid), None)
+
+_PAGINA_PRINCIPAL = {"id": PAGE_ID, "intento": 0.0}
+
+def pagina_principal():
+    """Id de la página de Guaranístore: PAGE_ID o, si falta, se lo pregunta a Meta una vez."""
+    if not _PAGINA_PRINCIPAL["id"] and time.time() - _PAGINA_PRINCIPAL["intento"] > 300:
+        _PAGINA_PRINCIPAL["intento"] = time.time()
+        try:
+            r = requests.get(GRAPH_API + "/me", params={"fields": "id", "access_token": PAGE_TOKEN}, timeout=10)
+            if r.status_code == 200:
+                _PAGINA_PRINCIPAL["id"] = str(r.json().get("id", "") or "")
+        except Exception as e:
+            print(">>> PAGE_ID error:", e)
+    return _PAGINA_PRINCIPAL["id"]
+
+def negocio_por_pagina(page_id):
+    page_id = str(page_id or "")
+    principal = pagina_principal()
+    if not page_id or page_id == principal: return PRINCIPAL
+    for n in negocios_guardados():
+        if n.page_id and n.page_id == page_id: return n
+    # Si todavía no se sabe cuál es la página de Guaranístore, todo va a Guaranístore (como siempre).
+    return None if principal else PRINCIPAL
+
+def negocio_por_clave(clave):
+    if _igual(clave, CLAVE_PANEL): return PRINCIPAL
+    for n in negocios_guardados():
+        if _igual(clave, n.clave_panel): return n
+    return None
 
 # ---------- GEMINI ----------
 def preguntar_a_gemini(historial, texto_nuevo, prompt, _reintento=True):
@@ -270,7 +497,7 @@ def preguntar_a_gemini(historial, texto_nuevo, prompt, _reintento=True):
     contents.append({"role": "user", "parts": [{"text": texto_nuevo}]})
     cuerpo = {"system_instruction": {"parts": [{"text": prompt}]}, "contents": contents}
     try:
-        r = requests.post(GEMINI, json=cuerpo, timeout=30)
+        r = requests.post(_gemini(), json=cuerpo, timeout=30)
         data = r.json()
         cands = data.get("candidates")
         if cands and cands[0].get("content", {}).get("parts"):
@@ -295,7 +522,7 @@ def leer_comprobante(image_bytes, mime="image/jpeg"):
         {"text": instruccion}
     ]}]}
     try:
-        r = requests.post(GEMINI, json=cuerpo, timeout=45)
+        r = requests.post(_gemini(), json=cuerpo, timeout=45)
         txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
         txt = txt.replace("```json", "").replace("```", "").strip()
         return json.loads(txt)
@@ -305,7 +532,7 @@ def leer_comprobante(image_bytes, mime="image/jpeg"):
 
 # ---------- MESSENGER ----------
 def _post_msg(payload):
-    try: requests.post(GRAPH, params={"access_token": PAGE_TOKEN}, json=payload, timeout=10)
+    try: requests.post(GRAPH, params={"access_token": N().page_token}, json=payload, timeout=10)
     except Exception: pass
 
 def mostrar_escribiendo(sender): _post_msg({"recipient": {"id": sender}, "sender_action": "typing_on"})
@@ -314,7 +541,7 @@ def marcar_leido(sender): _post_msg({"recipient": {"id": sender}, "sender_action
 def enviar_a_messenger(sender, texto):
     for parte in [texto[i:i+1900] for i in range(0, len(texto), 1900)] or [texto]:
         try:
-            r = requests.post(GRAPH, params={"access_token": PAGE_TOKEN},
+            r = requests.post(GRAPH, params={"access_token": N().page_token},
                               json={"recipient": {"id": sender}, "message": {"text": parte}}, timeout=10)
             print(">>> MESSENGER:", r.status_code, r.text[:120])
         except Exception as e:
@@ -325,16 +552,19 @@ def enviar_foto(sender, url_foto):
 
 # ---------- TELEGRAM / WHATSAPP ----------
 def avisar_telegram(texto):
+    n = N()
+    if not (n.telegram_token and n.telegram_chat): return   # un negocio sin Telegram no avisa a nadie
     try:
-        requests.post("https://api.telegram.org/bot%s/sendMessage" % TELEGRAM_TOKEN,
-                      json={"chat_id": TELEGRAM_CHAT, "text": texto}, timeout=10)
+        requests.post("https://api.telegram.org/bot%s/sendMessage" % n.telegram_token,
+                      json={"chat_id": n.telegram_chat, "text": texto}, timeout=10)
     except Exception: pass
 
 def enviar_whatsapp(texto):
-    if not (WHATSAPP_DESTINO and CALLMEBOT_APIKEY): return
+    n = N()
+    if not (n.whatsapp_destino and n.callmebot_apikey): return
     try:
         requests.get("https://api.callmebot.com/whatsapp.php",
-                     params={"phone": WHATSAPP_DESTINO, "text": texto, "apikey": CALLMEBOT_APIKEY}, timeout=10)
+                     params={"phone": n.whatsapp_destino, "text": texto, "apikey": n.callmebot_apikey}, timeout=10)
     except Exception: pass
 
 # ---------- PEDIDOS ----------
@@ -362,38 +592,38 @@ def es_interior(ciudad):
 def total_con_envio(precio, ciudad):
     base = _solo_numero(precio)
     if es_interior(ciudad):
-        base += ENVIO_INTERIOR
+        base += N().envio_interior
     return base
 
 def formatear_pedido(resumen):
     d = _parsear(resumen)
     total = total_con_envio(d["precio"], d["ciudad"])
-    extra = " (incluye envío interior +%s)" % f"{ENVIO_INTERIOR:,}".replace(",", ".") if es_interior(d["ciudad"]) else ""
+    envio = N().envio_interior
+    extra = " (incluye envío interior +%s)" % f"{envio:,}".replace(",", ".") if es_interior(d["ciudad"]) else ""
     return ("🛍️  NUEVO PEDIDO — %s\n━━━━━━━━━━━━━━━\n"
             "👤  Nombre:     %s\n📍  Ciudad:     %s\n📞  Teléfono:   %s\n🏠  Dirección:  %s\n"
             "━━━━━━━━━━━━━━━\n💜  Producto:   %s\n💰  Total:      Gs. %s%s\n🕒  %s hs"
-            % (TIENDA, d["nombre"] or "-", d["ciudad"] or "-", d["tel"] or "-", d["direccion"] or "-",
+            % (N().nombre, d["nombre"] or "-", d["ciudad"] or "-", d["tel"] or "-", d["direccion"] or "-",
                d["producto"] or "Producto", f"{total:,}".replace(",", "."), extra, ahora()))
 
 def formatear_pedido_whatsapp(resumen):
     d = _parsear(resumen)
     total = total_con_envio(d["precio"], d["ciudad"])
-    return ("🛍️ *PEDIDO para cargar en Zappy*\n\n📦 %s — Gs. %s (contra entrega)\n\n"
+    titulo = "🛍️ *PEDIDO para cargar en Zappy*" if N().principal else "🛍️ *NUEVO PEDIDO — %s*" % N().nombre
+    return ("%s\n\n📦 %s — Gs. %s (contra entrega)\n\n"
             "👤 Cliente: %s\n📍 Ciudad: %s\n📞 Tel: %s\n🏠 Direccion: %s\n🕒 %s hs"
-            % (d["producto"] or "Producto", f"{total:,}".replace(",", "."), d["nombre"] or "-",
+            % (titulo, d["producto"] or "Producto", f"{total:,}".replace(",", "."), d["nombre"] or "-",
                d["ciudad"] or "-", d["tel"] or "-", d["direccion"] or "-", ahora()))
 
 def guardar_pedido(resumen, sender=""):
     d = _parsear(resumen)
     total = total_con_envio(d["precio"], d["ciudad"])
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"}
     cuerpo = {"fields": {"Producto": d["producto"], "Nombre": d["nombre"], "Ciudad": d["ciudad"],
                          "Telefono": d["tel"], "Direccion": d["direccion"],
                          "Total": "Gs. " + f"{total:,}".replace(",", "."),
                          "Fecha": ahora(), "Estado": "Nuevo", "Contacto": sender},
               "typecast": True}
-    try: requests.post(url, headers=headers, json=cuerpo, timeout=10)
+    try: requests.post(_at_url(TABLA_PEDIDOS), headers=_at_hdr(True), json=cuerpo, timeout=10)
     except Exception as e: print(">>> guardar_pedido error:", e)
 
 def revisar_pedido(sender, respuesta):
@@ -406,44 +636,92 @@ def revisar_pedido(sender, respuesta):
 def revisar_interes(sender, respuesta):
     m = re.search(r"\[INTERES\](.*?)\[/INTERES\]", respuesta, re.DOTALL)
     if not m: return respuesta
-    avisar_telegram("👀 INTERÉS de un cliente en %s:\n%s" % (TIENDA, m.group(1).strip()))
+    avisar_telegram("👀 INTERÉS de un cliente en %s:\n%s" % (N().nombre, m.group(1).strip()))
     return re.sub(r"\[INTERES\].*?\[/INTERES\]", "", respuesta, flags=re.DOTALL).strip()
 
 def revisar_fotos(sender, respuesta):
+    fotos = N().fotos
     if "[MASFOTOS]" in respuesta:
-        for u in FOTOS[3:6]: enviar_foto(sender, u)
+        for u in fotos[3:6]: enviar_foto(sender, u)
         respuesta = respuesta.replace("[MASFOTOS]", "")
     if "[FOTOS]" in respuesta:
-        for u in FOTOS[0:3]: enviar_foto(sender, u)
+        for u in fotos[0:3]: enviar_foto(sender, u)
         respuesta = respuesta.replace("[FOTOS]", "")
     return respuesta.strip()
 
 def revisar_video(sender, respuesta):
     if "[VIDEO]" in respuesta:
-        enviar_a_messenger(sender, "🎥 Miralo en acción: " + VIDEO)
+        if N().video:
+            enviar_a_messenger(sender, "🎥 Miralo en acción: " + N().video)
         respuesta = respuesta.replace("[VIDEO]", "")
     return respuesta.strip()
 
 # ---------- COMPROBANTES: actualizar pedido del cliente ----------
 def marcar_pedido_por_contacto(sender, estado):
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY}
-    r = requests.get(url, headers=headers,
-                     params={"filterByFormula": "{Contacto}='%s'" % sender, "maxRecords": 5}, timeout=10)
+    contacto = re.sub(r"\D", "", str(sender))
+    r = requests.get(_at_url(TABLA_PEDIDOS), headers=_at_hdr(),
+                     params={"filterByFormula": "{Contacto}='%s'" % contacto, "maxRecords": 5}, timeout=10)
     if r.status_code != 200: return False
     regs = r.json().get("records", [])
     if not regs: return False
     regs.sort(key=lambda x: x.get("createdTime", ""))
     rid = regs[-1]["id"]
-    requests.patch("%s/%s" % (url, rid),
-                   headers={"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"},
+    requests.patch(_at_url(TABLA_PEDIDOS, rid), headers=_at_hdr(True),
                    json={"fields": {"Estado": estado}}, timeout=10)
     return True
 
+# ---------- "BORRAR MIS DATOS" (lo pide Meta) ----------
+FRASES_BORRAR = ("borrar mis datos", "borra mis datos", "borren mis datos",
+                 "eliminar mis datos", "elimina mis datos", "eliminen mis datos")
+MSG_BORRADO = ("Listo 🙏 Borré nuestra charla y tus datos de contacto de nuestro sistema. "
+               "Si algún día querés volver a escribirnos, acá vamos a estar.")
+
+def pide_borrar_datos(texto):
+    t = " ".join(_norm(texto).split())
+    return any(f in t for f in FRASES_BORRAR)
+
+def _registros_de(tabla, campo, contacto):
+    regs, offset = [], None
+    for _ in range(20):
+        params = {"filterByFormula": "{%s}='%s'" % (campo, contacto), "pageSize": 100}
+        if offset: params["offset"] = offset
+        r = requests.get(_at_url(tabla), headers=_at_hdr(), params=params, timeout=10)
+        if r.status_code != 200: break
+        data = r.json()
+        regs += data.get("records", [])
+        offset = data.get("offset")
+        if not offset: break
+    return regs
+
+def borrar_datos_cliente(sender):
+    """Borra la memoria y la charla guardada de un cliente, y lo desvincula de sus pedidos
+    (el pedido queda para la entrega y la contabilidad del negocio, pero sin su id de Facebook)."""
+    contacto = re.sub(r"\D", "", str(sender))
+    if not contacto: return
+    key = N().clave_historial(contacto)
+    _upstash(["DEL", key])
+    HISTORIAL.pop(key, None)
+    MODO.pop((N().id, str(sender)), None)
+    borrados = 0
+    try:
+        ids = [x["id"] for x in _registros_de(TABLA_CONVERS, "contact_id", contacto)]
+        for i in range(0, len(ids), 10):   # Airtable borra de a 10
+            r = requests.delete(_at_url(TABLA_CONVERS), headers=_at_hdr(),
+                                params=[("records[]", x) for x in ids[i:i + 10]], timeout=10)
+            if r.status_code == 200: borrados += len(ids[i:i + 10])
+        pedidos = [x["id"] for x in _registros_de(TABLA_PEDIDOS, "Contacto", contacto)]
+        for i in range(0, len(pedidos), 10):
+            requests.patch(_at_url(TABLA_PEDIDOS), headers=_at_hdr(True),
+                           json={"records": [{"id": x, "fields": {"Contacto": ""}} for x in pedidos[i:i + 10]]},
+                           timeout=10)
+    except Exception as e:
+        print(">>> BORRAR DATOS error:", e)
+    print(">>> BORRAR DATOS:", N().id, "| mensajes borrados:", borrados)
+    avisar_telegram("🗑️ Un cliente pidió borrar sus datos y ya se borraron (%d mensajes)." % borrados)
+
 # ---------- REPORTES (modo dueño / panel) ----------
 def resumen_ventas():
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS)
-    r = requests.get(url, headers={"Authorization": "Bearer " + AIRTABLE_KEY},
+    r = requests.get(_at_url(TABLA_PEDIDOS), headers=_at_hdr(),
                      params={"maxRecords": 100}, timeout=10)
     if r.status_code != 200: return "No pude leer los pedidos."
     regs = r.json().get("records", [])
@@ -456,8 +734,7 @@ def resumen_ventas():
     return "\n".join(lineas)
 
 def productos_ganadores():
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS)
-    r = requests.get(url, headers={"Authorization": "Bearer " + AIRTABLE_KEY},
+    r = requests.get(_at_url(TABLA_PEDIDOS), headers=_at_hdr(),
                      params={"maxRecords": 100}, timeout=10)
     if r.status_code != 200: return "Sin datos de productos."
     conteo = {}
@@ -469,8 +746,7 @@ def productos_ganadores():
     return "\n".join("%d. %s — %d ventas" % (i + 1, n, c) for i, (n, c) in enumerate(ranking))
 
 def leer_conversaciones():
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS)
-    r = requests.get(url, headers={"Authorization": "Bearer " + AIRTABLE_KEY},
+    r = requests.get(_at_url(TABLA_CONVERS), headers=_at_hdr(),
                      params={"maxRecords": 60}, timeout=10)
     if r.status_code != 200: return "No pude leer las conversaciones."
     regs = r.json().get("records", [])
@@ -482,8 +758,31 @@ def contexto_dueno():
             "\n\n=== CONVERSACIONES ===\n" + leer_conversaciones())
 
 # ---------- WEBHOOK ----------
-MODO = {}
+MODO = {}            # (negocio, cliente) -> "dueno" / "vendedor"
 VISTOS = set()
+_VISTOS_LOCK = threading.Lock()
+_CANDADOS = {}       # un candado por cliente: sus mensajes se contestan de a uno y en orden
+_CANDADOS_LOCK = threading.Lock()
+
+def _ya_visto(mid):
+    with _VISTOS_LOCK:
+        if mid in VISTOS: return True
+        if len(VISTOS) > 2000: VISTOS.clear()
+        VISTOS.add(mid)
+        return False
+
+def _candado(clave):
+    with _CANDADOS_LOCK:
+        if len(_CANDADOS) > 5000:
+            for k in [k for k, c in _CANDADOS.items() if not c.locked()]:
+                _CANDADOS.pop(k, None)
+        return _CANDADOS.setdefault(clave, threading.Lock())
+
+def _firma_ok(cuerpo, firma):
+    """Meta firma cada mensaje con la clave secreta de la app (X-Hub-Signature-256)."""
+    if not META_APP_SECRET or not firma.startswith("sha256="): return False
+    esperado = hmac.new(META_APP_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(esperado, firma[7:])
 
 @app.get("/webhook")
 def verificar(request: Request):
@@ -493,97 +792,132 @@ def verificar(request: Request):
     return Response(content="Token incorrecto", status_code=403)
 
 @app.post("/webhook")
-async def recibir(request: Request):
+async def recibir(request: Request, tareas: BackgroundTasks):
+    """Le contesta a Meta AL INSTANTE y procesa cada mensaje aparte,
+    así un negocio lento nunca traba a los demás."""
+    cuerpo = await request.body()
+    if VERIFICAR_FIRMA and not _firma_ok(cuerpo, request.headers.get("x-hub-signature-256", "")):
+        print(">>> FIRMA inválida: se ignora el evento")
+        return {"ok": True}
     try:
-        data = await request.json()
+        data = json.loads(cuerpo or b"{}")
     except Exception as e:
         print(">>> ENTRANTE ilegible:", e)
         return {"ok": True}
+    if not isinstance(data, dict): return {"ok": True}
     print(">>> ENTRANTE:", json.dumps(data)[:400])
-    for entry in data.get("entry", []):
-        for ev in entry.get("messaging", []):
-            try:
-                msg = ev.get("message", {})
-                sender = ev.get("sender", {}).get("id")
-                if not sender: continue
-                mid = msg.get("mid")
-                if mid and mid in VISTOS: continue
-                if mid:
-                    VISTOS.add(mid)
-                    if len(VISTOS) > 500: VISTOS.clear()
-
-                # --- ¿Mandó una imagen? (comprobante de pago) ---
-                adjuntos = msg.get("attachments", [])
-                imagen = next((a for a in adjuntos if a.get("type") == "image"), None)
-                if imagen:
-                    marcar_leido(sender); mostrar_escribiendo(sender)
-                    url_img = imagen.get("payload", {}).get("url", "")
-                    contenido, mime = descargar(url_img)
-                    datos = leer_comprobante(contenido, mime or "image/jpeg") if contenido else None
-                    if datos and (datos.get("monto") or datos.get("referencia")):
-                        marcar_pedido_por_contacto(sender, "Pendiente de Verificación")
-                        avisar_telegram("🧾 COMPROBANTE recibido de un cliente:\n"
-                                        "Monto: %s | Ref: %s | Banco: %s"
-                                        % (datos.get("monto", "-"), datos.get("referencia", "-"), datos.get("banco_origen", "-")))
-                        enviar_a_messenger(sender, "¡Recibí tu comprobante! 🙏 Lo estoy verificando y en un ratito te confirmo. Gracias por tu compra 💜")
-                    else:
-                        enviar_a_messenger(sender, "Recibí tu imagen pero no pude leerla bien 🙈. ¿Me la reenviás un poco más clara, por favor?")
-                    continue
-
-                texto = msg.get("text")
-                if not texto: continue
-                print(">>> TEXTO:", repr(texto), "de", sender)
-                marcar_leido(sender); mostrar_escribiendo(sender)
-
-                bajo = texto.strip().lower()
-                if CLAVE_DUENO and bajo == CLAVE_DUENO:
-                    MODO[sender] = "dueno"; enviar_a_messenger(sender, "🔓 Modo dueño activado."); continue
-                if bajo in ("modo vendedor", "salir"):
-                    MODO[sender] = "vendedor"; enviar_a_messenger(sender, "🛍️ Volví a modo vendedor."); continue
-
-                if MODO.get(sender) == "dueno":
-                    resp = preguntar_a_gemini([], contexto_dueno() + "\n\nPregunta del dueño: " + texto, PROMPT_DUENO)
-                    enviar_a_messenger(sender, resp); continue
-
-                historial = leer_historial(sender)
-                print(">>> HISTORIAL len:", len(historial), "| upstash:", bool(UPSTASH_URL and UPSTASH_TOKEN))
-                guardar(sender, "user", texto)
-                resp = preguntar_a_gemini(historial, texto, SYSTEM_PROMPT)
-                resp = revisar_producto(resp, historial)
-                resp = revisar_pedido(sender, resp)
-                resp = revisar_interes(sender, resp)
-                resp = revisar_fotos(sender, resp)
-                resp = revisar_video(sender, resp)
-                if resp:
-                    enviar_a_messenger(sender, resp)
-                    guardar(sender, "bot", resp)
-            except Exception as _e:
-                print(">>> EVENTO error:", _e)
+    for entry in data.get("entry", []) or []:
+        page_id = str(entry.get("id", "") or "")
+        for ev in entry.get("messaging", []) or []:
+            mid = (ev.get("message") or {}).get("mid")
+            if mid and _ya_visto(mid): continue
+            tareas.add_task(procesar_evento, page_id, ev)
     return {"ok": True}
+
+def procesar_evento(page_id, ev):
+    try:
+        negocio = negocio_por_pagina(page_id)
+        if not negocio:
+            print(">>> PÁGINA sin negocio cargado:", page_id); return
+        if not negocio.activo:
+            print(">>> PAUSADO, no se contesta:", negocio.id); return
+        sender = (ev.get("sender") or {}).get("id")
+        if not sender or str(sender) == page_id: return
+        usar(negocio)
+        with _candado((negocio.id, str(sender))):
+            atender(str(sender), ev.get("message") or {})
+    except Exception as _e:
+        print(">>> EVENTO error:", _e)
+
+def atender(sender, msg):
+    n = N()
+    if msg.get("is_echo"): return   # es un mensaje que mandó la misma página
+
+    # --- ¿Mandó una imagen? (comprobante de pago) ---
+    adjuntos = msg.get("attachments", []) or []
+    imagen = next((a for a in adjuntos if a.get("type") == "image"), None)
+    if imagen:
+        marcar_leido(sender); mostrar_escribiendo(sender)
+        url_img = imagen.get("payload", {}).get("url", "")
+        contenido, mime = descargar(url_img)
+        datos = leer_comprobante(contenido, mime or "image/jpeg") if contenido else None
+        if datos and (datos.get("monto") or datos.get("referencia")):
+            marcar_pedido_por_contacto(sender, "Pendiente de Verificación")
+            avisar_telegram("🧾 COMPROBANTE recibido de un cliente:\n"
+                            "Monto: %s | Ref: %s | Banco: %s"
+                            % (datos.get("monto", "-"), datos.get("referencia", "-"), datos.get("banco_origen", "-")))
+            enviar_a_messenger(sender, "¡Recibí tu comprobante! 🙏 Lo estoy verificando y en un ratito te confirmo. Gracias por tu compra 💜")
+        else:
+            enviar_a_messenger(sender, "Recibí tu imagen pero no pude leerla bien 🙈. ¿Me la reenviás un poco más clara, por favor?")
+        return
+
+    texto = msg.get("text")
+    if not texto: return
+    print(">>> TEXTO:", repr(texto), "de", sender, "| negocio:", n.id)
+    marcar_leido(sender); mostrar_escribiendo(sender)
+
+    if pide_borrar_datos(texto):
+        borrar_datos_cliente(sender)
+        enviar_a_messenger(sender, MSG_BORRADO); return
+
+    bajo = texto.strip().lower()
+    clave_modo = (n.id, sender)
+    if n.clave_dueno and bajo == n.clave_dueno:
+        MODO[clave_modo] = "dueno"; enviar_a_messenger(sender, "🔓 Modo dueño activado."); return
+    if bajo in ("modo vendedor", "salir"):
+        MODO[clave_modo] = "vendedor"; enviar_a_messenger(sender, "🛍️ Volví a modo vendedor."); return
+
+    if MODO.get(clave_modo) == "dueno":
+        resp = preguntar_a_gemini([], contexto_dueno() + "\n\nPregunta del dueño: " + texto, n.prompt_dueno)
+        enviar_a_messenger(sender, resp); return
+
+    historial = leer_historial(sender)
+    print(">>> HISTORIAL len:", len(historial), "| upstash:", bool(UPSTASH_URL and UPSTASH_TOKEN))
+    guardar(sender, "user", texto)
+    resp = preguntar_a_gemini(historial, texto, n.system_prompt)
+    resp = revisar_producto(resp, historial)
+    resp = revisar_pedido(sender, resp)
+    resp = revisar_interes(sender, resp)
+    resp = revisar_fotos(sender, resp)
+    resp = revisar_video(sender, resp)
+    if resp:
+        enviar_a_messenger(sender, resp)
+        guardar(sender, "bot", resp)
 
 # ============================================================
 #   API DEL PANEL WEB
+#   La clave decide qué negocio ves: con la tuya, Guaranístore;
+#   con la de un cliente, solo lo suyo.
 # ============================================================
-def _panel_ok(clave): return bool(CLAVE_PANEL) and clave == CLAVE_PANEL
-def _no_auth(): return Response(content='{"error":"Clave incorrecta"}', status_code=401, media_type="application/json")
+def _panel_ok(clave):
+    negocio = negocio_por_clave(clave)
+    if not negocio: return False
+    if not negocio.activo:
+        _PAUSADO.set(True); return False
+    usar(negocio)
+    return True
+
+def _no_auth():
+    if _PAUSADO.get():
+        return Response(content='{"error":"pausado"}', status_code=403, media_type="application/json")
+    return Response(content='{"error":"Clave incorrecta"}', status_code=401, media_type="application/json")
 
 @app.get("/api/panel/resumen")
 def panel_resumen(x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS),
-                     headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"maxRecords": 100}, timeout=10)
+    r = requests.get(_at_url(TABLA_PEDIDOS), headers=_at_hdr(), params={"maxRecords": 100}, timeout=10)
     pedidos = [x.get("fields", {}) for x in r.json().get("records", [])] if r.status_code == 200 else []
     hoy = datetime.now(AR).strftime("%d/%m/%Y")
     def es(estado): return sum(1 for p in pedidos if str(p.get("Estado", "")).lower() == estado)
     return {"total": len(pedidos),
             "hoy": sum(1 for p in pedidos if str(p.get("Fecha", "")).startswith(hoy)),
-            "entregados": es("entregado"), "nuevos": es("nuevo")}
+            "entregados": es("entregado"), "nuevos": es("nuevo"),
+            "negocio": N().nombre}
 
 @app.get("/api/panel/pedidos")
 def panel_pedidos(x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS),
-                     headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"maxRecords": 100}, timeout=10)
+    r = requests.get(_at_url(TABLA_PEDIDOS), headers=_at_hdr(), params={"maxRecords": 100}, timeout=10)
     if r.status_code != 200: return {"pedidos": [], "error": r.text}
     out = []
     for reg in r.json().get("records", []):
@@ -595,34 +929,29 @@ def panel_pedidos(x_clave: str = Header(default="")):
     return {"pedidos": out}
 
 @app.post("/api/panel/pedido")
-async def panel_crear_pedido(request: Request, x_clave: str = Header(default="")):
+def panel_crear_pedido(d: dict = Depends(_cuerpo), x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    d = await request.json()
     cuerpo = {"fields": {"Producto": d.get("producto", ""), "Nombre": d.get("nombre", ""), "Ciudad": d.get("ciudad", ""),
                          "Telefono": d.get("telefono", ""), "Direccion": d.get("direccion", ""), "Total": d.get("total", ""),
                          "Fecha": ahora(), "Estado": d.get("estado", "Nuevo")}, "typecast": True}
-    r = requests.post("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS),
-                      headers={"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"},
-                      json=cuerpo, timeout=10)
+    r = requests.post(_at_url(TABLA_PEDIDOS), headers=_at_hdr(True), json=cuerpo, timeout=10)
     return {"ok": r.status_code in (200, 201), "error": None if r.status_code in (200, 201) else r.text}
 
 @app.post("/api/panel/estado")
-async def panel_estado(request: Request, x_clave: str = Header(default="")):
+def panel_estado(d: dict = Depends(_cuerpo), x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    d = await request.json()
-    r = requests.patch("https://api.airtable.com/v0/%s/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS, d.get("id", "")),
-                       headers={"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"},
+    rid = _rid(d.get("id", ""))
+    if not rid: return {"ok": False, "error": "id inválido"}
+    r = requests.patch(_at_url(TABLA_PEDIDOS, rid), headers=_at_hdr(True),
                        json={"fields": {"Estado": d.get("estado", "")}}, timeout=10)
     return {"ok": r.status_code == 200, "error": None if r.status_code == 200 else r.text}
 
 @app.post("/api/panel/aprobar-pedido")
-async def panel_aprobar_pedido(request: Request, x_clave: str = Header(default="")):
+def panel_aprobar_pedido(d: dict = Depends(_cuerpo), x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    d = await request.json()
-    rid = d.get("id", "")
-    url = "https://api.airtable.com/v0/%s/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS, rid)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"}
-    r = requests.patch(url, headers=headers, json={"fields": {"Estado": "Pagado"}}, timeout=10)
+    rid = _rid(d.get("id", ""))
+    if not rid: return {"ok": False, "error": "id inválido"}
+    r = requests.patch(_at_url(TABLA_PEDIDOS, rid), headers=_at_hdr(True), json={"fields": {"Estado": "Pagado"}}, timeout=10)
     if r.status_code != 200:
         return {"ok": False, "error": r.text}
     # Avisar al cliente por Messenger (si el pedido tiene Contacto)
@@ -634,8 +963,7 @@ async def panel_aprobar_pedido(request: Request, x_clave: str = Header(default="
 @app.get("/api/panel/catalogo")
 def panel_catalogo(x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CATALOGO),
-                     headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"maxRecords": 100}, timeout=10)
+    r = requests.get(_at_url(TABLA_CATALOGO), headers=_at_hdr(), params={"maxRecords": 100}, timeout=10)
     if r.status_code != 200: return {"productos": [], "error": r.text}
     out = []
     for reg in r.json().get("records", []):
@@ -646,35 +974,28 @@ def panel_catalogo(x_clave: str = Header(default="")):
     return {"productos": out}
 
 @app.post("/api/panel/producto")
-async def panel_crear_producto(request: Request, x_clave: str = Header(default="")):
+def panel_crear_producto(d: dict = Depends(_cuerpo), x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    d = await request.json()
     nombre = (d.get("nombre", "") or "").strip()
     pid = (d.get("producto_id", "") or "").strip() or nombre.lower().replace(" ", "")[:20] or "producto"
     cuerpo = {"fields": {"producto_id": pid, "nombre": nombre, "precio_gs": d.get("precio", ""),
                          "stock_estado": d.get("stock", "disponible"), "descripcion_corta": d.get("descripcion", "")},
               "typecast": True}
-    r = requests.post("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CATALOGO),
-                      headers={"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"},
-                      json=cuerpo, timeout=10)
+    r = requests.post(_at_url(TABLA_CATALOGO), headers=_at_hdr(True), json=cuerpo, timeout=10)
     return {"ok": r.status_code in (200, 201), "error": None if r.status_code in (200, 201) else r.text}
 
 @app.delete("/api/panel/producto")
-async def panel_borrar_producto(request: Request, x_clave: str = Header(default=""), clave: str = ""):
+def panel_borrar_producto(d: dict = Depends(_cuerpo), x_clave: str = Header(default=""), clave: str = ""):
     if not _ok2(x_clave, clave): return _no_auth()
-    try: rid = (await request.json()).get("id", "")
-    except Exception: rid = ""
-    rid = (rid or "").strip()
+    rid = _rid(d.get("id", ""))
     if not rid: return {"ok": False, "error": "falta id"}
-    r = requests.delete("https://api.airtable.com/v0/%s/%s/%s" % (AIRTABLE_BASE, TABLA_CATALOGO, rid),
-                        headers={"Authorization": "Bearer " + AIRTABLE_KEY}, timeout=10)
+    r = requests.delete(_at_url(TABLA_CATALOGO, rid), headers=_at_hdr(), timeout=10)
     return {"ok": r.status_code == 200, "error": None if r.status_code == 200 else r.text}
 
 @app.patch("/api/panel/editar-producto")
-async def panel_editar_producto(request: Request, x_clave: str = Header(default=""), clave: str = ""):
+def panel_editar_producto(d: dict = Depends(_cuerpo), x_clave: str = Header(default=""), clave: str = ""):
     if not _ok2(x_clave, clave): return _no_auth()
-    d = await request.json()
-    rid = (d.get("id", "") or "").strip()
+    rid = _rid(d.get("id", ""))
     if not rid: return {"ok": False, "error": "falta id"}
     campos = {}
     if d.get("nombre", "") != "": campos["nombre"] = d["nombre"]
@@ -682,33 +1003,29 @@ async def panel_editar_producto(request: Request, x_clave: str = Header(default=
     if d.get("stock", "") != "": campos["stock_estado"] = d["stock"]
     if "descripcion" in d: campos["descripcion_corta"] = d.get("descripcion", "")
     if not campos: return {"ok": False, "error": "nada para actualizar"}
-    r = requests.patch("https://api.airtable.com/v0/%s/%s/%s" % (AIRTABLE_BASE, TABLA_CATALOGO, rid),
-                       headers={"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"},
+    r = requests.patch(_at_url(TABLA_CATALOGO, rid), headers=_at_hdr(True),
                        json={"fields": campos, "typecast": True}, timeout=10)
     return {"ok": r.status_code == 200, "error": None if r.status_code == 200 else r.text}
 
 @app.post("/api/panel/fer")
-async def panel_fer(request: Request, x_clave: str = Header(default="")):
+def panel_fer(d: dict = Depends(_cuerpo), x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    d = await request.json()
     mensaje = (d.get("mensaje", "") or "").strip()
     if not mensaje: return {"respuesta": "Decime qué querés saber: ventas de hoy, qué conviene vender, últimos pedidos…"}
-    return {"respuesta": preguntar_a_gemini([], contexto_dueno() + "\n\nMensaje del dueño: " + mensaje, PROMPT_DUENO)}
+    return {"respuesta": preguntar_a_gemini([], contexto_dueno() + "\n\nMensaje del dueño: " + mensaje, N().prompt_dueno)}
 
 @app.get("/api/panel/seguimiento")
 def panel_seguimiento(x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
     # 1) Contactos que YA compraron (tienen pedido con su Contacto)
-    rp = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS),
-                      headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"maxRecords": 100}, timeout=10)
+    rp = requests.get(_at_url(TABLA_PEDIDOS), headers=_at_hdr(), params={"maxRecords": 100}, timeout=10)
     compraron = set()
     if rp.status_code == 200:
         for reg in rp.json().get("records", []):
             c = reg.get("fields", {}).get("Contacto", "")
             if c: compraron.add(str(c))
     # 2) Todas las charlas, agrupadas por contacto
-    rc = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
-                      headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"maxRecords": 300}, timeout=10)
+    rc = requests.get(_at_url(TABLA_CONVERS), headers=_at_hdr(), params={"maxRecords": 300}, timeout=10)
     if rc.status_code != 200: return {"seguimiento": [], "error": rc.text}
     registros = rc.json().get("records", [])
     registros.sort(key=lambda x: x.get("createdTime", ""))
@@ -731,20 +1048,18 @@ def panel_seguimiento(x_clave: str = Header(default="")):
     return {"seguimiento": salida}
 
 @app.post("/api/panel/reenganche")
-async def panel_reenganche(request: Request, x_clave: str = Header(default="")):
+def panel_reenganche(d: dict = Depends(_cuerpo), x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    d = await request.json()
     ultimo = (d.get("ultimo", "") or "").strip()
     p = ("Un cliente habló con la tienda pero no cerró la compra. Su último mensaje fue: '%s'. "
          "Escribí UN mensaje corto, cálido y en español paraguayo para reengancharlo y ayudarlo a decidir, "
          "sin presionar, recordando que paga contra entrega. Devolvé SOLO el mensaje, sin comillas." % ultimo)
-    return {"mensaje": preguntar_a_gemini([], p, SYSTEM_PROMPT)}
+    return {"mensaje": preguntar_a_gemini([], p, N().system_prompt)}
 
 @app.get("/api/panel/conversaciones")
 def panel_conversaciones(x_clave: str = Header(default="")):
     if not _panel_ok(x_clave): return _no_auth()
-    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
-                     headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"maxRecords": 200}, timeout=10)
+    r = requests.get(_at_url(TABLA_CONVERS), headers=_at_hdr(), params={"maxRecords": 200}, timeout=10)
     if r.status_code != 200: return {"conversaciones": [], "error": r.text}
     registros = r.json().get("records", [])
     registros.sort(key=lambda x: x.get("createdTime", ""))
@@ -763,9 +1078,8 @@ def panel_conversaciones(x_clave: str = Header(default="")):
     return {"conversaciones": salida}
 
 @app.post("/api/chat")
-async def chat_web(request: Request):
-    """Chat web: Fer atiende SIN Facebook. El frontend manda {mensaje, historial}."""
-    datos = await request.json()
+def chat_web(datos: dict = Depends(_cuerpo)):
+    """Chat web: Fer atiende SIN Facebook (como Guaranístore). El frontend manda {mensaje, historial}."""
     mensaje = (datos.get("mensaje", "") or "").strip()
     historial_in = datos.get("historial", []) or []
     if not mensaje:
@@ -775,7 +1089,7 @@ async def chat_web(request: Request):
     for m in historial_in[-20:]:
         rol = "user" if m.get("rol") == "user" else "bot"
         historial.append((rol, m.get("texto", "")))
-    resp = preguntar_a_gemini(historial, mensaje, SYSTEM_PROMPT)
+    resp = preguntar_a_gemini(historial, mensaje, N().system_prompt)
     # Procesa las mismas etiquetas (catálogo, interés); las de foto/pedido se limpian para el demo
     resp = revisar_producto(resp, historial)
     resp = re.sub(r"\[PEDIDO\].*?\[/PEDIDO\]", "", resp, flags=re.DOTALL)
@@ -794,12 +1108,12 @@ async def chat_web(request: Request):
 # ---------- Helper de clave: acepta header X-Clave O ?clave= en la URL ----------
 # (así podés probar cada endpoint pegando el link en el navegador)
 def _ok2(clave_header, clave_query):
-    return bool(CLAVE_PANEL) and (clave_header == CLAVE_PANEL or clave_query == CLAVE_PANEL)
+    return _panel_ok(clave_header) or _panel_ok(clave_query)
 
 # ---------- Helper: leer TODOS los pedidos (con paginación) ----------
 def _leer_pedidos():
-    url = "https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY}
+    url = _at_url(TABLA_PEDIDOS)
+    headers = _at_hdr()
     registros, offset = [], None
     for _ in range(10):
         params = {"pageSize": 100}
@@ -898,8 +1212,7 @@ def panel_seguimiento_plus(x_clave: str = Header(default=""), clave: str = ""):
         c = reg.get("fields", {}).get("Contacto", "")
         if c: compraron.add(str(c))
     # charlas agrupadas por contacto, con la última fecha
-    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
-                     headers={"Authorization": "Bearer " + AIRTABLE_KEY},
+    r = requests.get(_at_url(TABLA_CONVERS), headers=_at_hdr(),
                      params={"maxRecords": 300}, timeout=10)
     if r.status_code != 200: return {"seguimiento": [], "error": r.text}
     registros = r.json().get("records", [])
@@ -947,8 +1260,7 @@ def panel_analisis_charlas(x_clave: str = Header(default=""), clave: str = ""):
     for reg in _leer_pedidos():
         c = reg.get("fields", {}).get("Contacto", "")
         if c: compraron.add(str(c))
-    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
-                     headers={"Authorization": "Bearer " + AIRTABLE_KEY},
+    r = requests.get(_at_url(TABLA_CONVERS), headers=_at_hdr(),
                      params={"maxRecords": 300}, timeout=10)
     if r.status_code != 200: return {"analisis": "", "error": r.text}
     registros = r.json().get("records", [])
@@ -973,7 +1285,7 @@ def panel_analisis_charlas(x_clave: str = Header(default=""), clave: str = ""):
          "(al pedir datos, al hablar de precio, de envío, cuando el cliente se queda callado, etc.) "
          "Dame 3 o 4 patrones concretos y, por cada uno, un consejo corto para que Fer venda más. "
          "Sé directo y en español paraguayo.\n\n" + "\n\n".join(transcripts))
-    return {"analisis": preguntar_a_gemini([], p, PROMPT_DUENO),
+    return {"analisis": preguntar_a_gemini([], p, N().prompt_dueno),
             "charlas_analizadas": len(transcripts)}
 
 
@@ -1093,8 +1405,7 @@ def panel_cliente(id: str = "", x_clave: str = Header(default=""), clave: str = 
             pedidos.append({"producto": f.get("Producto", "-"), "total": f.get("Total", "-"),
                             "fecha": f.get("Fecha", "-"), "estado": f.get("Estado", "-")})
     # su charla
-    r = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
-                     headers={"Authorization": "Bearer " + AIRTABLE_KEY},
+    r = requests.get(_at_url(TABLA_CONVERS), headers=_at_hdr(),
                      params={"maxRecords": 300}, timeout=10)
     charla = []
     if r.status_code == 200:
@@ -1125,12 +1436,12 @@ def panel_cliente(id: str = "", x_clave: str = Header(default=""), clave: str = 
 #  que hacemos después, con cuidado, para no arriesgar la venta.
 # ============================================================
 def _config_leer():
-    res = _upstash(["GET", "config:negocio"])
+    res = _upstash(["GET", N().clave_config()])
     if res:
         try: return json.loads(res)
         except Exception: pass
     # valores por defecto (los actuales)
-    return {"envio_interior": ENVIO_INTERIOR, "nota": ""}
+    return {"envio_interior": N().envio_interior, "nota": ""}
 
 @app.get("/api/panel/config")
 def panel_config_get(x_clave: str = Header(default=""), clave: str = ""):
@@ -1138,34 +1449,30 @@ def panel_config_get(x_clave: str = Header(default=""), clave: str = ""):
     return {"config": _config_leer()}
 
 @app.post("/api/panel/config")
-async def panel_config_set(request: Request, x_clave: str = Header(default=""), clave: str = ""):
+def panel_config_set(d: dict = Depends(_cuerpo), x_clave: str = Header(default=""), clave: str = ""):
     if not _ok2(x_clave, clave): return _no_auth()
-    d = await request.json()
     actual = _config_leer()
     if "envio_interior" in d: actual["envio_interior"] = _solo_numero(d.get("envio_interior"))
     if "nota" in d: actual["nota"] = str(d.get("nota", ""))[:500]
-    guardado = _upstash(["SET", "config:negocio", json.dumps(actual)])
+    guardado = _upstash(["SET", N().clave_config(), json.dumps(actual)])
     return {"ok": guardado is not None, "config": actual,
             "aviso": None if guardado is not None else "Upstash no configurado: no se pudo guardar."}
 
 
 @app.post("/api/panel/editar-costo")
-async def panel_editar_costo(request: Request, x_clave: str = Header(default=""), clave: str = ""):
+def panel_editar_costo(d: dict = Depends(_cuerpo), x_clave: str = Header(default=""), clave: str = ""):
     if not _ok2(x_clave, clave): return _no_auth()
-    d = await request.json()
-    rid = d.get("id", "")
+    rid = _rid(d.get("id", ""))
     costo = _solo_numero(d.get("costo", 0))
     if not rid: return {"ok": False, "error": "falta id"}
-    url = "https://api.airtable.com/v0/%s/%s/%s" % (AIRTABLE_BASE, TABLA_CATALOGO, rid)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY, "Content-Type": "application/json"}
-    r = requests.patch(url, headers=headers, json={"fields": {"costo_gs": costo}, "typecast": True}, timeout=10)
+    r = requests.patch(_at_url(TABLA_CATALOGO, rid), headers=_at_hdr(True),
+                       json={"fields": {"costo_gs": costo}, "typecast": True}, timeout=10)
     return {"ok": r.status_code == 200, "error": None if r.status_code == 200 else r.text}
 
 
 @app.post("/api/panel/postventa-mensaje")
-async def panel_postventa_mensaje(request: Request, x_clave: str = Header(default=""), clave: str = ""):
+def panel_postventa_mensaje(d: dict = Depends(_cuerpo), x_clave: str = Header(default=""), clave: str = ""):
     if not _ok2(x_clave, clave): return _no_auth()
-    d = await request.json()
     tipo = (d.get("tipo", "") or "").strip()
     nombre = (d.get("nombre", "") or "").strip() or "cliente"
     producto = (d.get("producto", "") or "").strip() or "el producto"
@@ -1179,26 +1486,24 @@ async def panel_postventa_mensaje(request: Request, x_clave: str = Header(defaul
         "recompra": "Pasó un tiempo desde su compra. Escribile para saludarlo y ofrecerle con naturalidad volver a comprar o un producto que combine con lo que llevó, sin insistir."
     }
     p = base + guias.get(tipo, guias["llego"])
-    return {"mensaje": preguntar_a_gemini([], p, SYSTEM_PROMPT)}
+    return {"mensaje": preguntar_a_gemini([], p, N().system_prompt)}
 
 
-# estado del ultimo aviso de diagnostico (para no spamear Telegram cuando el pinger revisa seguido)
-_DIAG_ULTIMO = {"firma": None, "ts": 0}
+# estado del ultimo aviso de diagnostico, por negocio (para no spamear Telegram cuando el pinger revisa seguido)
+_DIAG_ULTIMO = {}
 
-@app.get("/api/panel/diagnostico")
-def panel_diagnostico(x_clave: str = Header(default=""), clave: str = "", avisar: str = ""):
-    if not _ok2(x_clave, clave): return _no_auth()
+def _diagnostico(avisar="", extra=False):
+    n = N()
     checks = []
     def add(nombre, ok, detalle):
         checks.append({"nombre": nombre, "estado": "ok" if ok else "falla", "detalle": detalle})
 
     # 1) AIRTABLE + tablas + columnas clave
     try:
-        headers = {"Authorization": "Bearer " + AIRTABLE_KEY}
+        headers = _at_hdr()
         faltan_cols = []
         # Pedidos
-        rp = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS),
-                          headers=headers, params={"maxRecords": 1}, timeout=10)
+        rp = requests.get(_at_url(TABLA_PEDIDOS), headers=headers, params={"maxRecords": 1}, timeout=10)
         if rp.status_code != 200:
             add("Airtable · Pedidos", False, "No responde (%s). Revisá AIRTABLE_BASE o el nombre de la tabla." % rp.status_code)
         else:
@@ -1208,8 +1513,7 @@ def panel_diagnostico(x_clave: str = Header(default=""), clave: str = "", avisar
                 if recs and c not in cols: faltan_cols.append("Pedidos." + c)
             add("Airtable · Pedidos", True, "OK" + (" (ojo: faltan columnas " + ", ".join(faltan_cols) + " — puede ser que no haya pedidos con esos datos aún)" if faltan_cols else ""))
         # Catálogo + costo_gs
-        rc = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CATALOGO),
-                          headers=headers, params={"maxRecords": 1}, timeout=10)
+        rc = requests.get(_at_url(TABLA_CATALOGO), headers=headers, params={"maxRecords": 1}, timeout=10)
         if rc.status_code != 200:
             add("Airtable · Catálogo", False, "No responde (%s)." % rc.status_code)
         else:
@@ -1217,8 +1521,7 @@ def panel_diagnostico(x_clave: str = Header(default=""), clave: str = "", avisar
             cols = set(recs[0].get("fields", {}).keys()) if recs else set()
             add("Airtable · Catálogo", True, "OK" + ("" if (not recs or "costo_gs" in cols) else " (falta la columna costo_gs para calcular ganancia)"))
         # Conversaciones
-        rv = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
-                          headers=headers, params={"maxRecords": 1}, timeout=10)
+        rv = requests.get(_at_url(TABLA_CONVERS), headers=headers, params={"maxRecords": 1}, timeout=10)
         add("Airtable · Conversaciones", rv.status_code == 200, "OK" if rv.status_code == 200 else "No responde (%s)." % rv.status_code)
     except Exception as e:
         add("Airtable", False, "Error de conexión: " + str(e)[:120])
@@ -1232,23 +1535,32 @@ def panel_diagnostico(x_clave: str = Header(default=""), clave: str = "", avisar
 
     # 3) MESSENGER (token de la página)
     try:
-        rm = requests.get("https://graph.facebook.com/me", params={"access_token": PAGE_TOKEN}, timeout=10)
+        rm = requests.get("https://graph.facebook.com/me", params={"access_token": n.page_token}, timeout=10)
         ok = rm.status_code == 200
         add("Messenger (token)", ok, "OK" if ok else "Token vencido o inválido. Hay que regenerar el PAGE_TOKEN — el bot no puede responder a clientes.")
     except Exception as e:
         add("Messenger (token)", False, "Error: " + str(e)[:120])
 
+    # 3b) solo desde admin.html: ¿la página está conectada al bot?
+    if extra and n.page_id and n.page_token:
+        try:
+            rs = requests.get(GRAPH_API + "/%s/subscribed_apps" % n.page_id,
+                              params={"access_token": n.page_token}, timeout=10)
+            conectada = rs.status_code == 200 and bool(rs.json().get("data"))
+            add("Página conectada al bot", conectada, "OK" if conectada else "La página no le manda los mensajes al bot. Tocá «Conectar página».")
+        except Exception as e:
+            add("Página conectada al bot", False, "Error: " + str(e)[:120])
+
     # 4) GEMINI (cerebro)
     try:
-        rg = requests.post(GEMINI, json={"contents": [{"parts": [{"text": "ping"}]}]}, timeout=15)
+        rg = requests.post(_gemini(), json={"contents": [{"parts": [{"text": "ping"}]}]}, timeout=15)
         add("Gemini (cerebro)", rg.status_code == 200, "OK" if rg.status_code == 200 else "No responde (%s). Puede ser límite de uso o la GEMINI_KEY." % rg.status_code)
     except Exception as e:
         add("Gemini (cerebro)", False, "Error: " + str(e)[:120])
 
     # 5) PEDIDOS TRABADOS (comprobantes sin verificar / sin cobrar hace >=3 días)
     try:
-        rt = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_PEDIDOS),
-                          headers={"Authorization": "Bearer " + AIRTABLE_KEY}, params={"pageSize": 100}, timeout=10)
+        rt = requests.get(_at_url(TABLA_PEDIDOS), headers=_at_hdr(), params={"pageSize": 100}, timeout=10)
         trabados = 0
         if rt.status_code == 200:
             ahora_utc = datetime.now(timezone.utc)
@@ -1272,27 +1584,33 @@ def panel_diagnostico(x_clave: str = Header(default=""), clave: str = "", avisar
     # - avisa UNA sola vez cuando todo se recupera
     if avisar == "1":
         try:
+            ultimo = _DIAG_ULTIMO.setdefault(n.id, {"firma": None, "ts": 0})
             firma = "|".join(sorted(c["nombre"] for c in fallas))
             ahora = datetime.now(timezone.utc).timestamp()
-            prev = _DIAG_ULTIMO.get("firma")
+            prev = ultimo.get("firma")
             COOLDOWN = 6 * 3600
             if fallas:
                 cambio = (firma != prev)
-                paso_tiempo = (ahora - _DIAG_ULTIMO.get("ts", 0)) > COOLDOWN
+                paso_tiempo = (ahora - ultimo.get("ts", 0)) > COOLDOWN
                 if cambio or paso_tiempo:
-                    texto = "⚠️ DIAGNÓSTICO GUARANÍSTORE — revisá:\n" + "\n".join("• %s: %s" % (c["nombre"], c["detalle"]) for c in fallas)
+                    texto = "⚠️ DIAGNÓSTICO %s — revisá:\n" % n.marca_aviso + "\n".join("• %s: %s" % (c["nombre"], c["detalle"]) for c in fallas)
                     avisar_telegram(texto)
-                    _DIAG_ULTIMO["firma"] = firma
-                    _DIAG_ULTIMO["ts"] = ahora
+                    ultimo["firma"] = firma
+                    ultimo["ts"] = ahora
             else:
                 if prev:
-                    avisar_telegram("✅ GUARANÍSTORE: lo que estaba fallando ya se recuperó. Todo volvió a la normalidad.")
-                _DIAG_ULTIMO["firma"] = None
-                _DIAG_ULTIMO["ts"] = ahora
+                    avisar_telegram("✅ %s: lo que estaba fallando ya se recuperó. Todo volvió a la normalidad." % n.marca_aviso)
+                ultimo["firma"] = None
+                ultimo["ts"] = ahora
         except Exception:
             pass
 
     return {"salud": salud, "fallas": len(fallas), "checks": checks}
+
+@app.get("/api/panel/diagnostico")
+def panel_diagnostico(x_clave: str = Header(default=""), clave: str = "", avisar: str = ""):
+    if not _ok2(x_clave, clave): return _no_auth()
+    return _diagnostico(avisar)
 
 
 @app.get("/api/panel/acciones")
@@ -1300,7 +1618,7 @@ def panel_acciones(x_clave: str = Header(default=""), clave: str = ""):
     if not _ok2(x_clave, clave): return _no_auth()
     acciones = []
     ahora_utc = datetime.now(timezone.utc)
-    headers = {"Authorization": "Bearer " + AIRTABLE_KEY}
+    headers = _at_hdr()
 
     pedidos = _leer_pedidos()
 
@@ -1322,8 +1640,7 @@ def panel_acciones(x_clave: str = Header(default=""), clave: str = ""):
 
     # 1) LEADS que hablaron y no compraron
     try:
-        rv = requests.get("https://api.airtable.com/v0/%s/%s" % (AIRTABLE_BASE, TABLA_CONVERS),
-                          headers=headers, params={"maxRecords": 300}, timeout=10)
+        rv = requests.get(_at_url(TABLA_CONVERS), headers=headers, params={"maxRecords": 300}, timeout=10)
         if rv.status_code == 200:
             charlas = {}
             for reg in rv.json().get("records", []):
@@ -1416,6 +1733,228 @@ def panel_acciones(x_clave: str = Header(default=""), clave: str = ""):
 
     acciones.sort(key=lambda a: a["prioridad"])
     return {"acciones": acciones, "cantidad": len(acciones)}
+
+
+# ============================================================
+#   ADMIN — tus negocios (lo usa admin.html)
+#   Todo pide la cabecera X-Admin con tu ADMIN_CLAVE.
+# ============================================================
+def _admin_ok(clave): return _igual(clave, ADMIN_CLAVE)
+
+def _enmascarar(valor):
+    valor = str(valor or "")
+    return ("••••" + valor[-4:]) if valor else ""
+
+def _publico(n):
+    """Lo que admin.html puede ver de un negocio (los tokens, solo enmascarados)."""
+    d = dict(n.datos)
+    for k in SECRETOS:
+        d[k] = _enmascarar(d.get(k, ""))
+        d["tiene_" + k] = bool(n.datos.get(k))
+    if n.principal:
+        d["clave_panel"] = _enmascarar(d.get("clave_panel", ""))
+        d["clave_dueno"] = _enmascarar(d.get("clave_dueno", ""))
+        d["page_id"] = d.get("page_id") or pagina_principal()
+        d["prompt"] = ""
+    d["principal"] = n.principal
+    d["estado"] = "pausado" if not n.activo else ("activo" if n.conectado() or n.principal else "sin_conectar")
+    return d
+
+def _slug(t):
+    return "-".join(_norm(t).split())[:30].strip("-")
+
+def _id_libre(nombre, ocupados):
+    base = _slug(nombre) or "negocio"
+    nid, i = base, 2
+    while nid in ocupados or nid == "principal":
+        nid = "%s-%d" % (base, i); i += 1
+    return nid
+
+def _info_token(token):
+    """Le pregunta a Meta de qué página es un token, y si vence."""
+    try:
+        r = requests.get(GRAPH_API + "/me", params={"fields": "id,name,category", "access_token": token}, timeout=10)
+        j = r.json()
+    except Exception as e:
+        return {"ok": False, "error": "No pude hablar con Meta: " + str(e)[:100]}
+    if r.status_code != 200:
+        msg = (j.get("error") or {}).get("message", "") if isinstance(j, dict) else ""
+        if "category" in msg:
+            return {"ok": False, "error": "Ese token es de una persona, no de una página. Usá «Buscar mis páginas»."}
+        return {"ok": False, "error": "Meta no aceptó el token: " + (msg or str(r.status_code))[:160]}
+    info = {"ok": True, "page_id": str(j.get("id", "")), "nombre": j.get("name", ""), "vence": "", "avisos": []}
+    if META_APP_ID and META_APP_SECRET:
+        try:
+            rd = requests.get(GRAPH_API + "/debug_token",
+                              params={"input_token": token, "access_token": META_APP_ID + "|" + META_APP_SECRET}, timeout=10)
+            data = rd.json().get("data", {}) if rd.status_code == 200 else {}
+            exp = data.get("expires_at")
+            if exp == 0: info["vence"] = "nunca"
+            elif exp: info["vence"] = datetime.fromtimestamp(exp, AR).strftime("%d/%m/%Y %H:%M")
+            if exp: info["avisos"].append("Este token vence. Usá «Buscar mis páginas» para sacar uno que no venza.")
+            if data.get("app_id") and str(data.get("app_id")) != META_APP_ID:
+                info["avisos"].append("Este token es de otra app de Meta, no de la tuya.")
+            if data.get("scopes") and "pages_messaging" not in data.get("scopes", []):
+                info["avisos"].append("Al token le falta el permiso pages_messaging: el bot no va a poder contestar.")
+        except Exception:
+            pass
+    else:
+        info["avisos"].append("Sin META_APP_ID y META_APP_SECRET en Render no puedo saber si el token vence.")
+    return info
+
+@app.get("/api/admin/negocios")
+def admin_negocios(x_admin: str = Header(default="")):
+    if not _admin_ok(x_admin): return _no_auth()
+    hay_upstash = _upstash(["PING"]) is not None
+    lista = [_publico(PRINCIPAL)] + [_publico(n) for n in negocios_guardados(fresco=True)]
+    return {"negocios": lista, "upstash": hay_upstash,
+            "meta_app": bool(META_APP_ID and META_APP_SECRET), "firma": VERIFICAR_FIRMA}
+
+@app.post("/api/admin/negocio")
+def admin_guardar(d: dict = Depends(_cuerpo), x_admin: str = Header(default="")):
+    if not _admin_ok(x_admin): return _no_auth()
+    if not (UPSTASH_URL and UPSTASH_TOKEN):
+        return {"ok": False, "error": "Falta Upstash en Render (UPSTASH_REDIS_REST_URL y UPSTASH_REDIS_REST_TOKEN): sin eso no se pueden guardar negocios."}
+    nid = str(d.get("id", "") or "").strip()
+    if nid == "principal":
+        return {"ok": False, "error": "Guaranístore se configura con las variables de Render, no desde acá."}
+    otros = negocios_guardados(fresco=True)
+    if nid:
+        previo = _negocio_guardado(nid)
+        if previo is None: return {"ok": False, "error": "Ese negocio ya no existe. Recargá la página."}
+        datos = dict(previo)
+    else:
+        datos = {"id": _id_libre(d.get("nombre", ""), {n.id for n in otros}), "creado": ahora(), "activo": True}
+    token_nuevo = False
+    for k in CAMPOS_NEGOCIO:
+        if k in ("id", "creado", "activo", "page_id") or k not in d: continue
+        v = d[k]
+        # en los tokens, vacío (o el valor enmascarado ••••) = dejar el que ya estaba
+        if k in SECRETOS and (str(v or "").strip() == "" or str(v).startswith("••••")): continue
+        if k == "page_token": token_nuevo = True
+        datos[k] = v
+    datos = _limpiar_negocio(datos)
+
+    # el id de la página siempre sale del token (se lo pregunta a Meta), nunca se escribe a mano
+    if token_nuevo or (datos["page_token"] and not datos["page_id"]):
+        info = _info_token(datos["page_token"])
+        if not info.get("ok"): return {"ok": False, "error": info.get("error", "Token inválido")}
+        datos["page_id"] = info["page_id"]
+
+    errores = []
+    if not datos["nombre"]: errores.append("Falta el nombre del negocio")
+    if len(datos["clave_panel"]) < 8: errores.append("La clave del panel tiene que tener 8 letras o más")
+    if datos["airtable_base"] and not re.match(r"^app[A-Za-z0-9]{14}$", datos["airtable_base"]):
+        errores.append("La base de Airtable empieza con «app» y tiene 17 caracteres")
+    if datos["page_id"] and not re.match(r"^\d+$", datos["page_id"]):
+        errores.append("El id de la página son solo números")
+    if any(not u.startswith(("http://", "https://")) for u in datos["fotos"]):
+        errores.append("Cada foto tiene que ser un link que empiece con https://")
+    if datos["video"] and not datos["video"].startswith(("http://", "https://")):
+        errores.append("El video tiene que ser un link que empiece con https://")
+    if _igual(datos["clave_panel"], CLAVE_PANEL) or _igual(datos["clave_panel"], ADMIN_CLAVE):
+        errores.append("Esa clave de panel ya la usás vos: inventá otra")
+    for n in otros:
+        if n.id == datos["id"]: continue
+        if _igual(datos["clave_panel"], n.clave_panel): errores.append("Esa clave de panel ya la usa " + n.nombre)
+        if datos["page_id"] and datos["page_id"] == n.page_id: errores.append("Esa página ya está cargada en " + n.nombre)
+    if datos["page_id"] and datos["page_id"] == pagina_principal():
+        errores.append("Esa es la página de Guaranístore")
+    if errores: return {"ok": False, "error": " · ".join(errores)}
+
+    if not _guardar_negocio(datos):
+        return {"ok": False, "error": "Upstash no respondió. Probá de nuevo en un minuto."}
+    return {"ok": True, "negocio": _publico(Negocio(datos))}
+
+@app.post("/api/admin/pausar")
+def admin_pausar(d: dict = Depends(_cuerpo), x_admin: str = Header(default="")):
+    if not _admin_ok(x_admin): return _no_auth()
+    nid = str(d.get("id", "") or "")
+    if nid == "principal": return {"ok": False, "error": "Guaranístore no se puede pausar desde acá."}
+    datos = _negocio_guardado(nid)
+    if datos is None: return {"ok": False, "error": "No encontré ese negocio."}
+    datos["activo"] = bool(d.get("activo", False))
+    if not _guardar_negocio(datos): return {"ok": False, "error": "Upstash no respondió."}
+    return {"ok": True, "activo": datos["activo"]}
+
+@app.post("/api/admin/borrar-negocio")
+def admin_borrar(d: dict = Depends(_cuerpo), x_admin: str = Header(default="")):
+    if not _admin_ok(x_admin): return _no_auth()
+    nid = str(d.get("id", "") or "")
+    if not nid or nid == "principal": return {"ok": False, "error": "Ese no se puede borrar."}
+    if _negocio_guardado(nid) is None: return {"ok": False, "error": "No encontré ese negocio."}
+    return {"ok": _borrar_negocio(nid)}
+
+@app.post("/api/admin/validar-token")
+def admin_validar_token(d: dict = Depends(_cuerpo), x_admin: str = Header(default="")):
+    if not _admin_ok(x_admin): return _no_auth()
+    token = str(d.get("page_token", "") or "").strip()
+    if not token and d.get("id"):
+        n = negocio_por_id(str(d.get("id")))
+        token = n.page_token if n else ""
+    if not token: return {"ok": False, "error": "Pegá el token de la página."}
+    return _info_token(token)
+
+@app.post("/api/admin/paginas")
+def admin_paginas(d: dict = Depends(_cuerpo), x_admin: str = Header(default="")):
+    """Con el token de la PERSONA (Graph API Explorer) trae sus páginas con un token de cada una.
+    Si están META_APP_ID y META_APP_SECRET, esos tokens de página no vencen."""
+    if not _admin_ok(x_admin): return _no_auth()
+    token = str(d.get("user_token", "") or "").strip()
+    if not token: return {"ok": False, "error": "Pegá el token que te da el Graph API Explorer."}
+    largo = False
+    if META_APP_ID and META_APP_SECRET:
+        try:
+            r = requests.get(GRAPH_API + "/oauth/access_token",
+                             params={"grant_type": "fb_exchange_token", "client_id": META_APP_ID,
+                                     "client_secret": META_APP_SECRET, "fb_exchange_token": token}, timeout=10)
+            if r.status_code == 200 and r.json().get("access_token"):
+                token, largo = r.json()["access_token"], True
+            else:
+                return {"ok": False, "error": "Meta no aceptó el token: " + ((r.json().get("error") or {}).get("message", "") or str(r.status_code))[:160]}
+        except Exception as e:
+            return {"ok": False, "error": "No pude hablar con Meta: " + str(e)[:100]}
+    try:
+        r = requests.get(GRAPH_API + "/me/accounts", params={"fields": "id,name,access_token", "limit": 100,
+                                                             "access_token": token}, timeout=10)
+        j = r.json()
+    except Exception as e:
+        return {"ok": False, "error": "No pude hablar con Meta: " + str(e)[:100]}
+    if r.status_code != 200:
+        return {"ok": False, "error": "Meta no aceptó el token: " + ((j.get("error") or {}).get("message", "") or str(r.status_code))[:160]}
+    paginas = [{"page_id": str(p.get("id", "")), "nombre": p.get("name", ""), "page_token": p.get("access_token", "")}
+               for p in j.get("data", [])]
+    aviso = "" if largo else "Sin META_APP_ID y META_APP_SECRET en Render, estos tokens vencen en unas horas."
+    return {"ok": True, "paginas": paginas, "no_vencen": largo, "aviso": aviso}
+
+@app.post("/api/admin/conectar")
+def admin_conectar(d: dict = Depends(_cuerpo), x_admin: str = Header(default="")):
+    """Suscribe la página a tu app: desde ahí Meta le manda sus mensajes al bot."""
+    if not _admin_ok(x_admin): return _no_auth()
+    nid = str(d.get("id", "") or "")
+    if nid == "principal": return {"ok": False, "error": "Guaranístore ya está conectada desde la app de Meta."}
+    n = negocio_por_id(nid)
+    if not n: return {"ok": False, "error": "No encontré ese negocio."}
+    if not n.conectado(): return {"ok": False, "error": "Primero guardá el token de la página."}
+    try:
+        r = requests.post(GRAPH_API + "/%s/subscribed_apps" % n.page_id,
+                          params={"subscribed_fields": "messages", "access_token": n.page_token}, timeout=10)
+        j = r.json()
+    except Exception as e:
+        return {"ok": False, "error": "No pude hablar con Meta: " + str(e)[:100]}
+    if r.status_code == 200 and j.get("success"):
+        return {"ok": True}
+    return {"ok": False, "error": "Meta dijo: " + ((j.get("error") or {}).get("message", "") or str(r.status_code))[:200]}
+
+@app.get("/api/admin/revisar")
+def admin_revisar(id: str = "", x_admin: str = Header(default="")):
+    if not _admin_ok(x_admin): return _no_auth()
+    n = negocio_por_id(id)
+    if not n: return {"error": "No encontré ese negocio."}
+    usar(n)
+    resultado = _diagnostico(extra=True)
+    resultado["negocio"] = n.nombre
+    return resultado
 
 
 @app.get("/")
