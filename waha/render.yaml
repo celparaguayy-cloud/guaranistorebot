@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: waha-guaranistore
+    runtime: image
+    image:
+      url: docker.io/devlikeapro/waha:gows-2026.10.1
+    plan: starter
+    region: virginia
+    healthCheckPath: /ping
+    disk:
+      name: sesiones
+      mountPath: /app/.sessions
+      sizeGB: 1
+    envVars:
+      - key: WAHA_API_KEY
+        sync: false
+      - key: PORT
+        value: "3000"
+      - key: WHATSAPP_DEFAULT_ENGINE
+        value: GOWS
+      - key: WHATSAPP_RESTART_ALL_SESSIONS
+        value: "True"
+      - key: WAHA_DASHBOARD_ENABLED
+        value: "False"
+      - key: WHATSAPP_SWAGGER_ENABLED
+        value: "False"
+      - key: WAHA_GOWS_DEVICE_HISTORY_SYNC_FULL_SYNC_DAYS_LIMIT
+        value: "7"
+      - key: WAHA_GOWS_DEVICE_HISTORY_SYNC_RECENT_SYNC_DAYS_LIMIT
+        value: "3"
+      - key: WAHA_GOWS_DEVICE_HISTORY_SYNC_INITIAL_SYNC_MAX_MESSAGES_PER_CHAT
+        value: "20"
+      - key: WAHA_GOWS_DEVICE_HISTORY_SYNC_THUMBNAIL_SYNC_DAYS_LIMIT
+        value: "1"
